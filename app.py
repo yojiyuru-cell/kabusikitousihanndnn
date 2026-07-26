@@ -4,8 +4,15 @@ import pandas as pd
 import numpy as np
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse,HTMLResponse
+from fastapi.responses import  Response FileResponse,HTMLResponse
 
+ 
+app = FastAPI()
+
+# 👇 この2行を追加（ファビコンの要求が来たら空の204（No Content）を返す）
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    return Response(status_code=204)
 # ---------------------------------------------------------
 # 1. データ取得・テクニカル分析ロジック
 # ---------------------------------------------------------
