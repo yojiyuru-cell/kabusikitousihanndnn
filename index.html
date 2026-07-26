@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+   <meta charset="UTF-8">
+   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+   <title>JPX Short Signal Detector</title>
+   <!-- Lightweight Charts ライブラリ読み込み -->
+   <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+   <style>
+       :root {
+           --bg-color: #0f172a; --card-bg: #1e293b; --text-color: #f8fafc;
+           --accent-red: #ef4444; --accent-green: #22c55e; --accent-blue: #3b82f6; --border-color: #334155;
+       }
+       * { box-sizing: border-box; margin: 0; padding: 0; }
+       body { font-family: sans-serif; background-color: var(--bg-color); color: var(--text-color); padding: 20px; }
+       header { display: flex; justify-content: space-between; align-items: center; padding-bottom: 20px; border-bottom: 1px solid var(--border-color); margin-bottom: 20px; }
+       .status-badge { background-color: #064e3b; color: #34d399; padding: 6px 12px; border-radius: 20px; font-size: 0.85rem; font-weight: bold; }
+       .dashboard-grid { display: grid; grid-template-columns: 350px 1fr; gap: 20px; }
+       .panel { background-color: var(--card-bg); border: 1px solid var(--border-color); border-radius: 8px; padding: 20px; }
+       .signal-card { background: #0f172a; border-left: 4px solid var(--accent-red); padding: 12px; border-radius: 4px; margin-bottom: 10px; cursor: pointer; transition: 0.2s; }
+       .signal-card:hover { background: #334155; }
+       #chart-container { width: 100%; height: 380px; margin-bottom: 20px; background-color: #090d16; border-radius: 6px; }
+       .reason-box { background: #0f172a; border: 1px solid var(--border-color); padding: 15px; border-radius: 6px; }
+       .target-prices { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 15px; }
+       .target-card { padding: 10px; border-radius: 4px; text-align: center; }
+       .stop-loss { background: rgba(239, 68, 68, 0.1); border: 1px solid var(--accent-red); }
+       .take-profit { background: rgba(34, 197, 94, 0.1); border: 1px solid var(--accent-green); }
+   </style>
+</head>
+<body>
+   <header>
+       <h1>📉 JPX Short Signal Detector</h1>
+       <div class="status-badge" id="status">● app.pyと接続中</div>
+   </header>
+
+   <div class="dashboard-grid">
+       <div class="panel">
+           <h3 style="margin-bottom: 15px; color: #94a3b8;">🚨 空売り検知銘柄リスト</h3>
+           <div id="signal-list">Python分析エンジンを実行中...</div>
+       </div>
+
+       <div class="panel">
+           <h2 id="stock-title">銘柄を選択してください</h2>
+           <p id="daily-info" style="color: #94a3b8; margin-bottom: 15px; font-size: 0.9rem;"></p>
+
+           <div id="chart-container"></div>
+
+           <div class="reason-box">
+               <div style="font-weight: bold; color: #f59e0b; margin-bottom: 8px;">💡 空売りエントリー根拠</div>
+               <ul id="reason-list" style="padding-left: 20px; font-size: 0.95rem;">
+                   <li>リストから銘柄を選択すると、自動算出された分析根拠が表示されます。</li>
+               </ul>
+
+               <div class="target-prices">
+                   <div class="target-card stop-loss">
+                       <div style="font-size: 0.8rem; color: var(--accent-red);">損切りライン (目安)</div>
+                       <div style="font-size: 1.2rem; font-weight: bold;" id="stop-loss-val">- 円</div>
+                   </div>
+                   <div class="target-card take-profit">
+                       <div style="font-size: 0.8rem; color: var(--accent-green);">利確目標ライン (目安)</div>
+                       <div style="font-size: 1.2rem; font-weight: bold;" id="take-profit-val">- 円</div>
+                   </div>
+               </div>
+           </div>
+       </div>
+   </div>
+
+   <script>
+       // 1. チャートの作成（初期設定）
+       const chartContainer = document.getElementById('chart-container');
+       const chart = LightweightCharts.createChart(chartContainer, {
+           layout: { backgroundColor: '#090d16', textColor: '#cbd5e1' },
+           grid: { vertLines: { color: '#1e293b' }, horzLines: { color: '#1e293b' } }
+       });
+       const candlestickSeries = chart.addCandlestickSeries({ upColor: '#22c55e', downColor: '#ef4444' });
+       const vwapSeries = chart.addLineSeries({ color: '#3b82f6', lineWidth: 2 });
+
+       // 2. Python (app.py) から分析結果を取得する処理
+       async function loadSignalsFromPython() {
+           try {
+               // app.py の /api/signals からデータを受信
+               const res = await fetch('/api/signals');
+               const signals = await res.json();
+               const listEl = document.getElementById('signal-list');
+               listEl.innerHTML = '';
+
+               if (signals.length === 0) {
+                   listEl.innerHTML = '<p style="color: #64748b; font-size:0.9rem;">現在過熱感のある空売り対象銘柄はありません。</p>';
+                   return;
+               }
+
+               // 検出された銘柄カードを画面に生成
+               signals.forEach(s => {
+                   const card = document.createElement('div');
+                   card.className = 'signal-card';
+                   card.innerHTML = `
+                       <div style="font-weight: bold; display: flex; justify-content: space-between;">
+                           <span>${s.code} ${s.name}</span>
+                           <span style="color: var(--accent-red);">${s.price}円</span>
+                       </div>
+                   `;
+                   card.onclick = () => updateDashboard(s);
+                   listEl.appendChild(card);
+               });
+
+               // 最初に見つかった銘柄を自動選択して表示
+               if (signals.length > 0) updateDashboard(signals[0]);
+
+           } catch (err) {
+               console.error("Pythonとの通信に失敗しました:", err);
+               document.getElementById('signal-list').innerText = "エラー: app.py が起動していません。";
+           }
+       }
+
+       // 3. 選択された銘柄のデータとチャートを画面にセットする処理
+       async function updateDashboard(s) {
+           document.getElementById('stock-title').innerText = `[${s.code}] ${s.name}`;
+           document.getElementById('daily-info').innerText = `日足分析: 25日乖離率 +${s.daily_dev}% / RSI ${s.daily_rsi}%`;
+           document.getElementById('stop-loss-val').innerText = `${s.stop_loss}円`;
+           document.getElementById('take-profit-val').innerText = `${s.take_profit}円`;
+
+           // 根拠リストの生成
+           const reasonEl = document.getElementById('reason-list');
+           reasonEl.innerHTML = '';
+           if (s.is_vwap_break) {
+               reasonEl.innerHTML += `<li><b>VWAP下抜け:</b> 5分足VWAP（${s.vwap}円）を割込み、買い手の含み損状態が発生。</li>`;
+           }
+           s.shape_patterns.forEach(pattern => {
+               reasonEl.innerHTML += `<li><b>チャートパターン:</b> ${pattern}</li>`;
+           });
+
+           // app.py から指定銘柄の 5分足＆VWAPデータ を取得してチャート描画
+           const chartRes = await fetch(`/api/chart/${s.code}`);
+           const chartData = await chartRes.json();
+           candlestickSeries.setData(chartData.candles);
+           vwapSeries.setData(chartData.vwap);
+       }
+
+       // ページ読み込み時にPythonとの連携処理を実行
+       loadSignalsFromPython();
+   </script>
+</body>
+</html>
