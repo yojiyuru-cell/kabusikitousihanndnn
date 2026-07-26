@@ -4,7 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>株価テクニカル分析ダッシュボード</title>
-    <!-- Lightweight Charts ライブラリ読み込み -->
     <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
     <style>
         body {
@@ -40,6 +39,12 @@
             color: white;
             background-color: #dc3545;
             margin-right: 5px;
+        }
+        .badge-timing-today {
+            background-color: #28a745; /* 緑色 */
+        }
+        .badge-timing-prev {
+            background-color: #6c757d; /* グレー */
         }
         .chart-container {
             width: 100%;
@@ -99,12 +104,15 @@
             const card = document.createElement('div');
             card.className = 'card';
 
+            const timingBadgeClass = item.signal_timing === '当日検出' ? 'badge-timing-today' : 'badge-timing-prev';
+            const timingBadge = `<span class="badge ${timingBadgeClass}">${item.signal_timing}</span>`;
+
             const patternsHtml = item.shape_patterns.length > 0 
                 ? item.shape_patterns.map(p => `<span class="badge">${p}</span>`).join(' ')
                 : '<span style="color:#6c757d;">なし</span>';
 
             card.innerHTML = `
-                <h2>${item.name} (${item.code})</h2>
+                <h2>${timingBadge} ${item.name} (${item.code})</h2>
                 <div class="info-grid">
                     <div><strong>現在値:</strong> ${item.price} 円</div>
                     <div><strong>VWAP:</strong> ${item.vwap} 円</div>
@@ -118,8 +126,6 @@
             `;
 
             container.appendChild(card);
-
-            // チャートデータの描画処理
             renderChart(item.code);
         }
 
@@ -134,21 +140,11 @@
                 const chart = LightweightCharts.createChart(chartElement, {
                     width: chartElement.clientWidth,
                     height: 300,
-                    layout: {
-                        background: { color: '#ffffff' },
-                        textColor: '#333',
-                    },
-                    grid: {
-                        vertLines: { color: '#f0f0f0' },
-                        horzLines: { color: '#f0f0f0' },
-                    },
-                    timeScale: {
-                        timeVisible: true,
-                        secondsVisible: false,
-                    },
+                    layout: { background: { color: '#ffffff' }, textColor: '#333' },
+                    grid: { vertLines: { color: '#f0f0f0' }, horzLines: { color: '#f0f0f0' } },
+                    timeScale: { timeVisible: true, secondsVisible: false },
                 });
 
-                // ⭕【修正ポイント】Lightweight Charts v4以降の最新API構文を使用
                 const candlestickSeries = chart.addSeries(LightweightCharts.CandlestickSeries, {
                     upColor: '#26a69a',
                     downColor: '#ef5350',
@@ -173,7 +169,6 @@
             }
         }
 
-        // ページ読み込み時に実行
         window.addEventListener('DOMContentLoaded', fetchSignals);
     </script>
 </body>
