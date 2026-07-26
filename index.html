@@ -40,12 +40,12 @@
             background-color: #dc3545;
             margin-right: 5px;
         }
-        .badge-timing-today {
-            background-color: #28a745; /* 緑色 */
-        }
-        .badge-timing-prev {
-            background-color: #6c757d; /* グレー */
-        }
+        .badge-timing-today { background-color: #007bff; }
+        .badge-timing-prev { background-color: #6c757d; }
+        .badge-success { background-color: #28a745; }
+        .badge-fail { background-color: #dc3545; }
+        .badge-active { background-color: #ffc107; color: #212529; }
+        
         .chart-container {
             width: 100%;
             height: 300px;
@@ -107,19 +107,25 @@
             const timingBadgeClass = item.signal_timing === '当日検出' ? 'badge-timing-today' : 'badge-timing-prev';
             const timingBadge = `<span class="badge ${timingBadgeClass}">${item.signal_timing}</span>`;
 
+            let resultBadgeClass = 'badge-active';
+            if (item.status_result.includes('成功')) resultBadgeClass = 'badge-success';
+            if (item.status_result.includes('失敗')) resultBadgeClass = 'badge-fail';
+            
+            const resultBadge = `<span class="badge ${resultBadgeClass}">${item.status_result}</span>`;
+
             const patternsHtml = item.shape_patterns.length > 0 
-                ? item.shape_patterns.map(p => `<span class="badge">${p}</span>`).join(' ')
+                ? item.shape_patterns.map(p => `<span class="badge" style="background-color:#17a2b8;">${p}</span>`).join(' ')
                 : '<span style="color:#6c757d;">なし</span>';
 
             card.innerHTML = `
-                <h2>${timingBadge} ${item.name} (${item.code})</h2>
+                <h2>${timingBadge} ${resultBadge} ${item.name} (${item.code})</h2>
                 <div class="info-grid">
                     <div><strong>現在値:</strong> ${item.price} 円</div>
                     <div><strong>VWAP:</strong> ${item.vwap} 円</div>
                     <div><strong>25日乖離率:</strong> ${item.daily_dev}%</div>
                     <div><strong>RSI(14):</strong> ${item.daily_rsi}</div>
-                    <div><strong>利確目安:</strong> ${item.take_profit} 円</div>
-                    <div><strong>損切目安:</strong> ${item.stop_loss} 円</div>
+                    <div><strong>利確目安(-2%):</strong> ${item.take_profit} 円</div>
+                    <div><strong>損切目安(+1.5%):</strong> ${item.stop_loss} 円</div>
                 </div>
                 <div><strong>検出パターン:</strong> ${patternsHtml}</div>
                 <div id="chart-${item.code}" class="chart-container"></div>
