@@ -24,7 +24,7 @@ async def favicon():
 # 1. データ取得・テクニカル分析ロジック
 # ---------------------------------------------------------
 def fetch_jpx_data(ticker_symbol: str, interval: str = "1d", period: str = "3mo") -> pd.DataFrame:
-    """東証銘柄（例: '6857' -> '6857.T'）の株価データを取得"""
+    """東証銘柄の株価データを取得"""
     formatted_ticker = f"{ticker_symbol}.T" if not ticker_symbol.endswith(".T") else ticker_symbol
     try:
         stock = yf.Ticker(formatted_ticker)
@@ -55,7 +55,7 @@ def check_daily_overbought(df_daily: pd.DataFrame, dev_threshold: float = 15.0, 
     return is_overbought, round(dev_rate, 2), round(latest_rsi, 2)
 
 def detect_chart_patterns(df_5m: pd.DataFrame) -> list:
-    """5分足のローソク足形状パターン判定"""
+    """ローソク足パターン検出"""
     patterns = []
     if df_5m.empty or len(df_5m) < 5:
         return patterns
@@ -69,12 +69,12 @@ def detect_chart_patterns(df_5m: pd.DataFrame) -> list:
         patterns.append("上ヒゲ大陰線（上値抵抗感）")
 
     if prev['High'] > latest['High'] and latest['Close'] < prev['Close']:
-        patterns.append("高値切り下げ（上昇推移の失速）")
+        patterns.append("高値切り下げ（失速）")
 
     return patterns
 
 def analyze_5m_short_signal(ticker_symbol: str, name: str):
-    """5分足のVWAP下抜け判定（当日および前日判定に対応）"""
+    """VWAP下抜けおよび前日・当日の成功・失敗判定"""
     df_5m = fetch_jpx_data(ticker_symbol, interval="5m", period="5d")
     if df_5m.empty or len(df_5m) < 10:
         return None
@@ -86,6 +86,7 @@ def analyze_5m_short_signal(ticker_symbol: str, name: str):
     cum_vol = df_5m.groupby('Date')['Volume'].cumsum()
     df_5m['VWAP'] = cum_pv / cum_vol
 
+    # VWAP下抜けシグナルの検出
     df_5m['is_break'] = (df_5m['Close'].shift(1) >= df_5m['VWAP'].shift(1)) & (df_5m['Close'] < df_5m['VWAP'])
 
     dates = sorted(list(set(df_5m['Date'])))
@@ -103,6 +104,31 @@ def analyze_5m_short_signal(ticker_symbol: str, name: str):
 
     signal_timing = "当日検出" if today_breaks else "前日検出"
 
+    # --- 成功・結果判定ロジック ---
+    target_date = latest_date if today_breaks else prev_date
+    df_target = df_5m[df_5m['Date'] == target_date]
+    
+    # シグナルが出た最初の足
+    break_rows = df_target[df_target['is_break']]
+    if not break_rows.empty:
+        break_price = break_rows.iloc[0]['Close']
+        target_price = break_price * 0.98  # -2%下落を目標とする
+        stop_price = break_price * 1.015   # +1.5%上昇で損切
+
+        # シグナル発生以降の安値と高値
+        after_break_df = df_target.loc[break_rows.index[0]:]
+        min_price = after_break_df['Low'].min()
+        max_price = after_break_df['High'].max()
+
+        if min_price <= target_price:
+            status_result = "【成功】利確達成"
+        elif max_price >= stop_price:
+            status_result = "【失敗】損切"
+        else:
+            status_result = "【継続中】含み益/推移中"
+    else:
+        status_result = "判定中"
+
     latest = df_5m.iloc[-1]
     patterns = detect_chart_patterns(df_5m)
     latest_close = latest['Close']
@@ -113,9 +139,10 @@ def analyze_5m_short_signal(ticker_symbol: str, name: str):
         "price": round(latest_close, 1),
         "vwap": round(latest['VWAP'], 1),
         "signal_timing": signal_timing,
+        "status_result": status_result,
         "shape_patterns": patterns,
-        "stop_loss": round(latest_close * 1.02),
-        "take_profit": round(latest_close * 0.95)
+        "stop_loss": round(latest_close * 1.015),
+        "take_profit": round(latest_close * 0.98)
     }
 
 # ---------------------------------------------------------
@@ -130,7 +157,6 @@ JAPAN_STOCKS = {
     "6526": "ソシオネクスト"
 }
 
-# --- APIルートを上に配置 ---
 @app.get("/api/signals")
 def get_signals():
     results = []
@@ -175,7 +201,6 @@ def get_chart_data(code: str):
 
     return JSONResponse(content={"candles": candles, "vwap": vwap_list})
 
-# --- HTMLルートを最後に配置 ---
 @app.get("/")
 def get_index():
     if os.path.exists("index.html"):
@@ -183,3 +208,6 @@ def get_index():
             html_content = f.read()
         return HTMLResponse(content=html_content)
     return HTMLResponse(content="<h1>index.html が見つかりません</h1>", status_code=404)
+   
+
+    
