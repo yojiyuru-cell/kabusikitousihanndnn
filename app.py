@@ -1,10 +1,11 @@
+import os
 import datetime
 import yfinance as yf
 import pandas as pd
 import numpy as np
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response, HTMLResponse
+from fastapi.responses import Response, HTMLResponse, JSONResponse
 
 app = FastAPI()
 
@@ -85,10 +86,8 @@ def analyze_5m_short_signal(ticker_symbol: str, name: str):
     cum_vol = df_5m.groupby('Date')['Volume'].cumsum()
     df_5m['VWAP'] = cum_pv / cum_vol
 
-    # VWAP下抜け判定フラグを追加 (前足 >= VWAP かつ 現足 < VWAP)
     df_5m['is_break'] = (df_5m['Close'].shift(1) >= df_5m['VWAP'].shift(1)) & (df_5m['Close'] < df_5m['VWAP'])
 
-    # 営業日（日付）ごとのグループを取得
     dates = sorted(list(set(df_5m['Date'])))
     if len(dates) < 1:
         return None
@@ -96,19 +95,13 @@ def analyze_5m_short_signal(ticker_symbol: str, name: str):
     latest_date = dates[-1]
     prev_date = dates[-2] if len(dates) >= 2 else None
 
-    # 当日および前日のVWAP下抜け発生状況を確認
     today_breaks = df_5m[df_5m['Date'] == latest_date]['is_break'].any()
     prev_breaks = df_5m[df_5m['Date'] == prev_date]['is_break'].any() if prev_date else False
 
-    # 当日にも前日にも下抜けが発生していない場合は対象外
     if not today_breaks and not prev_breaks:
         return None
 
-    # タイミングラベルの設定
-    if today_breaks:
-        signal_timing = "当日検出"
-    else:
-        signal_timing = "前日検出"
+    signal_timing = "当日検出" if today_breaks else "前日検出"
 
     latest = df_5m.iloc[-1]
     patterns = detect_chart_patterns(df_5m)
@@ -126,7 +119,7 @@ def analyze_5m_short_signal(ticker_symbol: str, name: str):
     }
 
 # ---------------------------------------------------------
-# 2. Web APIサーバー（FastAPI）
+# 2. Web API サーバー（FastAPI）
 # ---------------------------------------------------------
 JAPAN_STOCKS = {
     "6857": "アドバンテスト",
@@ -137,12 +130,7 @@ JAPAN_STOCKS = {
     "6526": "ソシオネクスト"
 }
 
-@app.get("/")
-def get_index():
-    with open("index.html", "r", encoding="utf-8") as f:
-        html_content = f.read()
-    return HTMLResponse(content=html_content)
-
+# --- APIルートを上に配置 ---
 @app.get("/api/signals")
 def get_signals():
     results = []
@@ -155,13 +143,13 @@ def get_signals():
                 signal_data["daily_dev"] = dev
                 signal_data["daily_rsi"] = rsi
                 results.append(signal_data)
-    return results
+    return JSONResponse(content=results)
 
 @app.get("/api/chart/{code}")
 def get_chart_data(code: str):
     df_5m = fetch_jpx_data(code, interval="5m", period="5d")
     if df_5m.empty:
-        return {"candles": [], "vwap": []}
+        return JSONResponse(content={"candles": [], "vwap": []})
 
     df_5m['TP'] = (df_5m['High'] + df_5m['Low'] + df_5m['Close']) / 3
     df_5m['PV'] = df_5m['TP'] * df_5m['Volume']
@@ -185,4 +173,13 @@ def get_chart_data(code: str):
             "value": round(row['VWAP'], 1)
         })
 
-    return {"candles": candles, "vwap": vwap_list}  
+    return JSONResponse(content={"candles": candles, "vwap": vwap_list})
+
+# --- HTMLルートを最後に配置 ---
+@app.get("/")
+def get_index():
+    if os.path.exists("index.html"):
+        with open("index.html", "r", encoding="utf-8") as f:
+            html_content = f.read()
+        return HTMLResponse(content=html_content)
+    return HTMLResponse(content="<h1>index.html が見つかりません</h1>", status_code=404)
