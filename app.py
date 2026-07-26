@@ -1,8 +1,7 @@
 import os
-import datetime
-import yfinance as yf
+import urllib.request
 import pandas as pd
-import numpy as np
+import yfinance as yf
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, HTMLResponse, JSONResponse
@@ -20,11 +19,43 @@ app.add_middleware(
 async def favicon():
     return Response(status_code=204)
 
-# ---------------------------------------------------------
-# 1. データ取得・テクニカル分析ロジック
-# ---------------------------------------------------------
+def get_jpx_stock_list(limit: int = 100):
+    """
+    日本取引所グループ(JPX)公式から全銘柄一覧（Excel）を取得し、
+    上場銘柄（プライム・スタンダード・グロース）のコードと銘柄名の辞書を作成します。
+    ※ 処理時間を考慮し、デプロイ環境では上位 `limit` 銘柄（デフォルト100銘柄）をスキャン対象とします。
+    """
+    url = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xls"
+    try:
+        # Excelファイルを直接読み込み
+        df = pd.read_excel(url)
+        # 銘柄コードと銘柄名の列を抽出
+        df_stocks = df[['コード', '銘柄名', '市場・商品区分']].dropna()
+        
+        stock_dict = {}
+        for _, row in df_stocks.iterrows():
+            code = str(int(row['コード']))
+            name = str(row['銘柄名'])
+            market = str(row['市場・商品区分'])
+            
+            # 内国株式（プライム、スタンダード、グロース）のみ抽出
+            if any(m in market for m in ['プライム', 'スタンダード', 'グロース']):
+                stock_dict[code] = name
+                if len(stock_dict) >= limit:  # 指定件数に達したら取得終了
+                    break
+                    
+        return stock_dict
+    except Exception as e:
+        print(f"JPX銘柄リスト取得エラー: {e}")
+        # フォールバック用デフォルト主要銘柄
+        return {
+            "6857": "アドバンテスト", "8035": "東京エレクトロン", "6146": "ディスコ",
+            "9984": "ソフトバンクG", "7011": "三菱重工", "6526": "ソシオネクスト",
+            "7203": "トヨタ自動車", "8306": "三菱UFJ", "6758": "ソニーG", "6723": "ルネサス",
+            "9983": "ファーストリテイリング", "6861": "キーエンス", "8316": "三井住友FG"
+        }
+
 def fetch_jpx_data(ticker_symbol: str, interval: str = "1d", period: str = "3mo") -> pd.DataFrame:
-    """東証銘柄の株価データを取得"""
     formatted_ticker = f"{ticker_symbol}.T" if not ticker_symbol.endswith(".T") else ticker_symbol
     try:
         stock = yf.Ticker(formatted_ticker)
@@ -33,187 +64,79 @@ def fetch_jpx_data(ticker_symbol: str, interval: str = "1d", period: str = "3mo"
     except Exception:
         return pd.DataFrame()
 
-def analyze_daily_short_judge(df_daily: pd.DataFrame):
-    """日足レベルでの空売り条件・失速感を総合判定"""
-    if df_daily.empty or len(df_daily) < 25:
-        return {
-            "is_candidate": False,
-            "dev": 0.0,
-            "rsi": 0.0,
-            "patterns": [],
-            "judgment": "データ不足"
-        }
-
-    df = df_daily.copy()
-    df['SMA5'] = df['Close'].rolling(window=5).mean()
-    df['SMA25'] = df['Close'].rolling(window=25).mean()
-    
-    latest_close = df['Close'].iloc[-1]
-    latest_open = df['Open'].iloc[-1]
-    latest_high = df['High'].iloc[-1]
-    latest_sma25 = df['SMA25'].iloc[-1]
-    latest_sma5 = df['SMA5'].iloc[-1]
-    
-    # 25日乖離率
-    dev_rate = ((latest_close - latest_sma25) / latest_sma25) * 100
-
-    # RSI (14)
-    delta = df['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    rs = gain / loss
-    rsi = 100 - (100 / (1 + rs))
-    latest_rsi = rsi.iloc[-1]
-
-    # 日足ローソク足・テクニカル形状
-    body = abs(latest_close - latest_open)
-    upper_shade = latest_high - max(latest_open, latest_close)
-    
-    daily_patterns = []
-    if upper_shade > (body * 1.5) and upper_shade > 0:
-        daily_patterns.append("日足上ヒゲ(上値重い)")
-    if latest_close < latest_open:
-        daily_patterns.append("日足陰線")
-    if latest_close < latest_sma5:
-        daily_patterns.append("5日線割り込み")
-
-    # 日足の総合空売り判断
-    is_candidate = (dev_rate >= 15.0) and (latest_rsi >= 70.0)
-    
-    if is_candidate:
-        if latest_close < latest_sma5 or "日足上ヒゲ(上値重い)" in daily_patterns:
-            judgment = "🔴 絶好（過熱＋日足失速）"
-        elif latest_rsi >= 80.0 or dev_rate >= 25.0:
-            judgment = "🟠 極度の過熱（転換警戒）"
-        else:
-            judgment = "🟡 高値圏過熱（崩れ待ち）"
-    else:
-        judgment = "⚪️ 判定対象外"
-
-    return {
-        "is_candidate": is_candidate,
-        "dev": round(dev_rate, 2),
-        "rsi": round(latest_rsi, 2),
-        "patterns": daily_patterns,
-        "judgment": judgment
-    }
-
-def detect_chart_patterns_5m(df_5m: pd.DataFrame) -> list:
-    """5分足ローソク足パターン検出"""
-    patterns = []
-    if df_5m.empty or len(df_5m) < 5:
-        return patterns
-
-    latest = df_5m.iloc[-1]
-    prev = df_5m.iloc[-2]
-
-    body = abs(latest['Close'] - latest['Open'])
-    upper_shade = latest['High'] - max(latest['Open'], latest['Close'])
-    if upper_shade > (body * 2) and latest['Close'] < latest['Open']:
-        patterns.append("上ヒゲ大陰線")
-
-    if prev['High'] > latest['High'] and latest['Close'] < prev['Close']:
-        patterns.append("高値切り下げ")
-
-    return patterns
-
-def analyze_5m_short_signal(ticker_symbol: str, name: str):
-    """VWAP下抜けおよび勝敗判定"""
-    df_5m = fetch_jpx_data(ticker_symbol, interval="5m", period="5d")
-    if df_5m.empty or len(df_5m) < 10:
-        return None
-
-    df_5m['TP'] = (df_5m['High'] + df_5m['Low'] + df_5m['Close']) / 3
-    df_5m['PV'] = df_5m['TP'] * df_5m['Volume']
-    df_5m['Date'] = df_5m.index.date
-    cum_pv = df_5m.groupby('Date')['PV'].cumsum()
-    cum_vol = df_5m.groupby('Date')['Volume'].cumsum()
-    df_5m['VWAP'] = cum_pv / cum_vol
-
-    # VWAP下抜けシグナル
-    df_5m['is_break'] = (df_5m['Close'].shift(1) >= df_5m['VWAP'].shift(1)) & (df_5m['Close'] < df_5m['VWAP'])
-
-    dates = sorted(list(set(df_5m['Date'])))
-    if len(dates) < 1:
-        return None
-
-    latest_date = dates[-1]
-    prev_date = dates[-2] if len(dates) >= 2 else None
-
-    today_breaks = df_5m[df_5m['Date'] == latest_date]['is_break'].any()
-    prev_breaks = df_5m[df_5m['Date'] == prev_date]['is_break'].any() if prev_date else False
-
-    if not today_breaks and not prev_breaks:
-        return None
-
-    signal_timing = "当日検出" if today_breaks else "前日検出"
-
-    # 勝敗・結果判定
-    target_date = latest_date if today_breaks else prev_date
-    df_target = df_5m[df_5m['Date'] == target_date]
-    
-    break_rows = df_target[df_target['is_break']]
-    if not break_rows.empty:
-        break_price = break_rows.iloc[0]['Close']
-        target_price = break_price * 0.98  # -2%下落
-        stop_price = break_price * 1.015   # +1.5%上昇
-
-        after_break_df = df_target.loc[break_rows.index[0]:]
-        min_price = after_break_df['Low'].min()
-        max_price = after_break_df['High'].max()
-
-        if min_price <= target_price:
-            status_result = "【成功】利確達成"
-        elif max_price >= stop_price:
-            status_result = "【失敗】損切"
-        else:
-            status_result = "【継続中】含み益/推移中"
-    else:
-        status_result = "判定中"
-
-    latest = df_5m.iloc[-1]
-    patterns_5m = detect_chart_patterns_5m(df_5m)
-    latest_close = latest['Close']
-
-    return {
-        "code": ticker_symbol,
-        "name": name,
-        "price": round(latest_close, 1),
-        "vwap": round(latest['VWAP'], 1),
-        "signal_timing": signal_timing,
-        "status_result": status_result,
-        "shape_patterns_5m": patterns_5m,
-        "stop_loss": round(latest_close * 1.015),
-        "take_profit": round(latest_close * 0.98)
-    }
-
-# ---------------------------------------------------------
-# 2. Web API サーバー（FastAPI）
-# ---------------------------------------------------------
-JAPAN_STOCKS = {
-    "6857": "アドバンテスト",
-    "8035": "東京エレクトロン",
-    "6146": "ディスコ",
-    "9984": "ソフトバンクグループ",
-    "7011": "三菱重工業",
-    "6526": "ソシオネクスト"
-}
-
 @app.get("/api/signals")
 def get_signals():
+    # JPXから動的に全上場銘柄リストを取得（タイムアウト回避のため100銘柄に制限）
+    stock_targets = get_jpx_stock_list(limit=100)
+    
     results = []
-    for code, name in JAPAN_STOCKS.items():
+    
+    for code, name in stock_targets.items():
+        # --- 1. 日足データ分析 ---
         df_daily = fetch_jpx_data(code, interval="1d", period="3mo")
-        daily_analysis = analyze_daily_short_judge(df_daily)
+        if df_daily.empty or len(df_daily) < 25:
+            continue
+
+        df_daily['SMA25'] = df_daily['Close'].rolling(window=25).mean()
+        latest_close = df_daily['Close'].iloc[-1]
+        latest_sma25 = df_daily['SMA25'].iloc[-1]
         
-        if daily_analysis["is_candidate"]:
-            signal_data = analyze_5m_short_signal(code, name)
-            if signal_data:
-                signal_data["daily_dev"] = daily_analysis["dev"]
-                signal_data["daily_rsi"] = daily_analysis["rsi"]
-                signal_data["daily_judgment"] = daily_analysis["judgment"]
-                signal_data["daily_patterns"] = daily_analysis["patterns"]
-                results.append(signal_data)
+        dev_rate = ((latest_close - latest_sma25) / latest_sma25) * 100
+
+        delta = df_daily['Close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        rsi = 100 - (100 / (1 + rs))
+        latest_rsi = rsi.iloc[-1]
+
+        # --- 2. 5分足データ分析 ---
+        df_5m = fetch_jpx_data(code, interval="5m", period="5d")
+        vwap_val = 0
+        vwap_status = "通常"
+        
+        if not df_5m.empty and len(df_5m) >= 5:
+            df_5m['TP'] = (df_5m['High'] + df_5m['Low'] + df_5m['Close']) / 3
+            df_5m['PV'] = df_5m['TP'] * df_5m['Volume']
+            df_5m['Date'] = df_5m.index.date
+            cum_pv = df_5m.groupby('Date')['PV'].cumsum()
+            cum_vol = df_5m.groupby('Date')['Volume'].cumsum()
+            df_5m['VWAP'] = cum_pv / cum_vol
+            
+            latest_5m = df_5m.iloc[-1]
+            vwap_val = latest_5m['VWAP']
+            
+            if latest_5m['Close'] < vwap_val:
+                vwap_status = "VWAP下回り"
+            else:
+                vwap_status = "VWAP上回り"
+
+        # --- 3. 判定ロジック ---
+        is_overheated = (dev_rate >= 8.0) or (latest_rsi >= 65.0)
+        is_vwap_below = (vwap_status == "VWAP下回り")
+
+        if is_overheated and is_vwap_below:
+            judgment = "🚨 空売りシグナル（過熱＋VWAP割れ）"
+        elif is_overheated:
+            judgment = "🟡 高値圏（監視）"
+        elif is_vwap_below:
+            judgment = "🔹 VWAP下回り"
+        else:
+            judgment = "⚪️ 通常"
+
+        results.append({
+            "code": code,
+            "name": name,
+            "price": round(latest_close, 1),
+            "vwap": round(vwap_val, 1),
+            "daily_dev": round(dev_rate, 2),
+            "daily_rsi": round(latest_rsi, 2),
+            "signal_timing": vwap_status,
+            "daily_judgment": judgment,
+            "stop_loss": round(latest_close * 1.015),
+            "take_profit": round(latest_close * 0.98)
+        })
+
     return JSONResponse(content=results)
 
 @app.get("/api/chart/{code}")
@@ -250,6 +173,5 @@ def get_chart_data(code: str):
 def get_index():
     if os.path.exists("index.html"):
         with open("index.html", "r", encoding="utf-8") as f:
-            html_content = f.read()
-        return HTMLResponse(content=html_content)
+            return HTMLResponse(content=f.read())
     return HTMLResponse(content="<h1>index.html が見つかりません</h1>", status_code=404)
