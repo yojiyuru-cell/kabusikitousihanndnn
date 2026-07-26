@@ -3,203 +3,217 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>株価テクニカル分析ダッシュボード</title>
+    <title>空売りシグナル・ダッシュボード</title>
     <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
     <style>
         body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-            margin: 20px;
-            background-color: #f8f9fa;
-            color: #333;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: #121214;
+            color: #e1e1e6;
+            margin: 0;
+            padding: 20px;
         }
         h1 {
-            border-bottom: 2px solid #007bff;
-            padding-bottom: 10px;
-            color: #2c3e50;
+            color: #00e676;
+            font-size: 24px;
+            margin-bottom: 20px;
         }
         .container {
             display: flex;
-            flex-wrap: wrap;
             gap: 20px;
+            flex-wrap: wrap;
         }
-        .card {
-            background: white;
+        .left-panel {
+            flex: 1;
+            min-width: 600px;
+            background: #202024;
             border-radius: 8px;
-            padding: 15px;
-            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
-            width: 100%;
-            max-width: 650px;
+            padding: 16px;
         }
-        .badge {
-            display: inline-block;
+        .right-panel {
+            width: 450px;
+            background: #202024;
+            border-radius: 8px;
+            padding: 16px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 14px;
+        }
+        th, td {
+            padding: 10px;
+            text-align: left;
+            border-bottom: 1px solid #2e2e32;
+        }
+        th {
+            background-color: #121214;
+            color: #a8a8b3;
+        }
+        tr:hover {
+            background-color: #29292e;
+            cursor: pointer;
+        }
+        .signal-badge {
+            font-weight: bold;
             padding: 4px 8px;
             border-radius: 4px;
-            font-size: 12px;
-            font-weight: bold;
-            color: white;
-            background-color: #dc3545;
-            margin-right: 5px;
         }
-        .badge-timing-today { background-color: #007bff; }
-        .badge-timing-prev { background-color: #6c757d; }
-        .badge-success { background-color: #28a745; }
-        .badge-fail { background-color: #dc3545; }
-        .badge-active { background-color: #ffc107; color: #212529; }
-
-        .daily-section {
-            background-color: #eef2f7;
-            padding: 10px;
-            border-radius: 6px;
-            margin-bottom: 12px;
-            border-left: 4px solid #007bff;
-        }
-        .daily-title {
-            font-weight: bold;
-            font-size: 14px;
-            margin-bottom: 5px;
-            color: #495057;
-        }
-
-        .chart-container {
+        .overheated { color: #ff5252; }
+        .normal { color: #00e676; }
+        #chart {
             width: 100%;
-            height: 300px;
-            margin-top: 15px;
-        }
-        .info-grid {
-            display: grid;
-            grid-template-columns: repeat(2, 1fr);
-            gap: 10px;
-            margin-bottom: 10px;
-            background: #f1f3f5;
-            padding: 10px;
-            border-radius: 5px;
+            height: 350px;
+            margin-top: 10px;
         }
         .loading {
-            font-size: 18px;
-            color: #6c757d;
+            color: #e1a100;
+            font-weight: bold;
         }
     </style>
 </head>
 <body>
 
-    <h1>過熱感・VWAP下抜け検出ダッシュボード</h1>
-    <div id="status" class="loading">データを取得中...</div>
-    <div id="cards-container" class="container"></div>
+    <h1>📉 日本株 空売りスキャン・ダッシュボード</h1>
+
+    <div class="container">
+        <!-- 左側: シグナル銘柄一覧 -->
+        <div class="left-panel">
+            <h2>スキャン対象銘柄</h2>
+            <p id="status-msg" class="loading">データを取得中（全銘柄スキャンには数十秒かかります）...</p>
+            <table>
+                <thead>
+                    <tr>
+                        <th>コード/銘柄</th>
+                        <th>現在値</th>
+                        <th>VWAP</th>
+                        <th>25日乖離率</th>
+                        <th>RSI</th>
+                        <th>状態/シグナル</th>
+                    </tr>
+                </thead>
+                <tbody id="signal-list">
+                    <!-- JavaScriptで動的生成 -->
+                </tbody>
+            </table>
+        </div>
+
+        <!-- 右側: 5分足チャート詳細 -->
+        <div class="right-panel">
+            <h2 id="chart-title">銘柄を選択してください</h2>
+            <div id="chart-info"></div>
+            <div id="chart"></div>
+        </div>
+    </div>
 
     <script>
-        async function fetchSignals() {
-            const statusEl = document.getElementById('status');
-            const container = document.getElementById('cards-container');
+        let chart = null;
+        let candleSeries = null;
+        let vwapSeries = null;
 
-            try {
-                const response = await fetch('/api/signals');
-                const data = await response.json();
-
-                statusEl.style.display = 'none';
-                container.innerHTML = '';
-
-                if (data.length === 0) {
-                    container.innerHTML = '<p>現在、条件に該当する銘柄はありません。</p>';
-                    return;
-                }
-
-                for (const item of data) {
-                    createCard(item);
-                }
-            } catch (error) {
-                console.error('Error fetching signals:', error);
-                statusEl.innerText = 'データの取得に失敗しました。';
-            }
-        }
-
-        async function createCard(item) {
-            const container = document.getElementById('cards-container');
-
-            const card = document.createElement('div');
-            card.className = 'card';
-
-            const timingBadgeClass = item.signal_timing === '当日検出' ? 'badge-timing-today' : 'badge-timing-prev';
-            const timingBadge = `<span class="badge ${timingBadgeClass}">${item.signal_timing}</span>`;
-
-            let resultBadgeClass = 'badge-active';
-            if (item.status_result.includes('成功')) resultBadgeClass = 'badge-success';
-            if (item.status_result.includes('失敗')) resultBadgeClass = 'badge-fail';
+        function initChart() {
+            const chartContainer = document.getElementById('chart');
+            chartContainer.innerHTML = '';
             
-            const resultBadge = `<span class="badge ${resultBadgeClass}">${item.status_result}</span>`;
+            chart = LightweightCharts.createChart(chartContainer, {
+                layout: {
+                    backgroundColor: '#202024',
+                    textColor: '#e1e1e6',
+                },
+                grid: {
+                    vertLines: { color: '#2e2e32' },
+                    horzLines: { color: '#2e2e32' },
+                },
+                timeScale: {
+                    timeVisible: true,
+                    secondsVisible: false,
+                },
+            });
 
-            const dailyPatternsHtml = item.daily_patterns.length > 0 
-                ? item.daily_patterns.map(p => `<span class="badge" style="background-color:#e83e8c;">${p}</span>`).join(' ')
-                : '<span style="color:#6c757d; font-size:12px;">特になし</span>';
+            candleSeries = chart.addCandlestickSeries({
+                upColor: '#00e676',
+                downColor: '#ff5252',
+                borderVisible: false,
+                wickUpColor: '#00e676',
+                wickDownColor: '#ff5252',
+            });
 
-            const patterns5mHtml = item.shape_patterns_5m.length > 0 
-                ? item.shape_patterns_5m.map(p => `<span class="badge" style="background-color:#17a2b8;">${p}</span>`).join(' ')
-                : '<span style="color:#6c757d; font-size:12px;">なし</span>';
-
-            card.innerHTML = `
-                <h2>${timingBadge} ${resultBadge} ${item.name} (${item.code})</h2>
-                
-                <div class="daily-section">
-                    <div class="daily-title">📊 日足空売り判断: <strong>${item.daily_judgment}</strong></div>
-                    <div><strong>日足シグナル:</strong> ${dailyPatternsHtml}</div>
-                </div>
-
-                <div class="info-grid">
-                    <div><strong>現在値:</strong> ${item.price} 円</div>
-                    <div><strong>VWAP:</strong> ${item.vwap} 円</div>
-                    <div><strong>25日乖離率:</strong> ${item.daily_dev}%</div>
-                    <div><strong>RSI(14):</strong> ${item.daily_rsi}</div>
-                    <div><strong>利確目安(-2%):</strong> ${item.take_profit} 円</div>
-                    <div><strong>損切目安(+1.5%):</strong> ${item.stop_loss} 円</div>
-                </div>
-                <div><strong>5分足形状:</strong> ${patterns5mHtml}</div>
-                <div id="chart-${item.code}" class="chart-container"></div>
-            `;
-
-            container.appendChild(card);
-            renderChart(item.code);
+            vwapSeries = chart.addLineSeries({
+                color: '#ff9800',
+                lineWidth: 2,
+                title: 'VWAP',
+            });
         }
 
-        async function renderChart(code) {
+        async function loadChart(code, name) {
+            document.getElementById('chart-title').innerText = `${code} ${name} (5分足)`;
+            
+            if (!chart) initChart();
+
             try {
                 const response = await fetch(`/api/chart/${code}`);
                 const data = await response.json();
 
-                const chartElement = document.getElementById(`chart-${code}`);
-                if (!chartElement || data.candles.length === 0) return;
+                if (!data.candles || data.candles.length === 0) {
+                    document.getElementById('chart').innerText = 'チャートデータがありません';
+                    return;
+                }
 
-                const chart = LightweightCharts.createChart(chartElement, {
-                    width: chartElement.clientWidth,
-                    height: 300,
-                    layout: { background: { color: '#ffffff' }, textColor: '#333' },
-                    grid: { vertLines: { color: '#f0f0f0' }, horzLines: { color: '#f0f0f0' } },
-                    timeScale: { timeVisible: true, secondsVisible: false },
-                });
-
-                const candlestickSeries = chart.addSeries(LightweightCharts.CandlestickSeries, {
-                    upColor: '#26a69a',
-                    downColor: '#ef5350',
-                    borderVisible: false,
-                    wickUpColor: '#26a69a',
-                    wickDownColor: '#ef5350',
-                });
-
-                const vwapSeries = chart.addSeries(LightweightCharts.LineSeries, {
-                    color: '#2962FF',
-                    lineWidth: 2,
-                    title: 'VWAP',
-                });
-
-                candlestickSeries.setData(data.candles);
-                vwapSeries.setData(data.vwap);
-
+                candleSeries.setData(data.candles);
+                vwapSeries.setData(data.vwap || []);
                 chart.timeScale().fitContent();
-
-            } catch (error) {
-                console.error(`Error rendering chart for ${code}:`, error);
+            } catch (err) {
+                console.error('チャート読み込みエラー:', err);
             }
         }
 
-        window.addEventListener('DOMContentLoaded', fetchSignals);
+        async function fetchSignals() {
+            try {
+                const response = await fetch('/api/signals');
+                const data = await response.json();
+                
+                const tbody = document.getElementById('signal-list');
+                tbody.innerHTML = '';
+
+                document.getElementById('status-msg').innerText = `更新完了: ${data.length} 銘柄のデータを取得しました`;
+                document.getElementById('status-msg').className = 'normal';
+
+                data.forEach(item => {
+                    const tr = document.createElement('tr');
+                    tr.onclick = () => loadChart(item.code, item.name);
+
+                    const priceStr = item.price ? item.price.toLocaleString() : '-';
+                    const vwapStr = item.vwap ? item.vwap.toLocaleString() : '-';
+                    const devVal = item.daily_dev ?? 0;
+                    const rsiVal = item.daily_rsi ?? 0;
+                    const judgmentStr = item.daily_judgment || '⚪️ 通常';
+
+                    tr.innerHTML = `
+                        <td><strong>${item.code}</strong><br><small>${item.name}</small></td>
+                        <td>${priceStr}円</td>
+                        <td>${vwapStr}円</td>
+                        <td class="${devVal >= 8 ? 'overheated' : ''}">${devVal}%</td>
+                        <td class="${rsiVal >= 65 ? 'overheated' : ''}">${rsiVal}</td>
+                        <td><span class="signal-badge">${judgmentStr}</span></td>
+                    `;
+                    tbody.appendChild(tr);
+                });
+
+                if (data.length > 0) {
+                    loadChart(data[0].code, data[0].name);
+                }
+
+            } catch (err) {
+                document.getElementById('status-msg').innerText = 'データ取得に失敗しました';
+                document.getElementById('status-msg').className = 'overheated';
+                console.error(err);
+            }
+        }
+
+        window.addEventListener('DOMContentLoaded', () => {
+            fetchSignals();
+            setInterval(fetchSignals, 60000);
+        });
     </script>
 </body>
 </html>
