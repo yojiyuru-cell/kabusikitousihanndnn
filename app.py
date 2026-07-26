@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse,HTMLResponse
 
 # ---------------------------------------------------------
 # 1. データ取得・テクニカル分析ロジック
