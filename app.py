@@ -118,7 +118,11 @@ JAPAN_STOCKS = {
 
 @app.get("/")
 def get_index():
-   return FileResponse("index.html")
+   with open("index.html","r",encording="utf=8") as f:
+      html_content = f.read()
+      return HTMLResponse(content=html_content)
+  
+   
 
 @app.get("/api/signals")
 def get_signals():
