@@ -1,7 +1,7 @@
 import os
 import math
-import requests
 import io
+import requests
 import pandas as pd
 import yfinance as yf
 from fastapi import FastAPI
@@ -10,6 +10,7 @@ from fastapi.responses import Response, HTMLResponse, JSONResponse
 
 app = FastAPI()
 
+# CORSミドルウェアの設定
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -28,8 +29,8 @@ def safe_float(val, default=0.0):
     except Exception:
         return default
 
-# JPX（日本取引所グループ）から全上場銘柄リストを自動取得する関数
-def get_jpx_stock_list_auto(limit: int = 300):
+# JPXから銘柄リストを自動取得（失敗時は主要人気銘柄に切り替え）
+def get_jpx_stock_list_auto(limit: int = 200):
     jpx_url = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xls"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
@@ -37,22 +38,17 @@ def get_jpx_stock_list_auto(limit: int = 300):
     
     stock_dict = {}
     try:
-        print("📥 JPX公式サイトから最新の全銘柄リストを自動取得中...")
+        print("📥 JPX公式サイトから最新の全銘柄リストを取得中...")
         res = requests.get(jpx_url, headers=headers, timeout=10)
         res.raise_for_status()
         
-        # Excelファイルの読み込み
         df = pd.read_excel(io.BytesIO(res.content))
         
-        # 必要なカラムの抽出 (コード, 銘柄名, 市場・商品区分)
         if 'コード' in df.columns and '銘柄名' in df.columns:
-            # 内国株式（プライム、スタンダード、グロース）のみ抽出
             df_stocks = df.dropna(subset=['コード', '銘柄名'])
-            
             for _, row in df_stocks.iterrows():
                 try:
                     code_raw = str(row['コード']).split('.')[0].strip()
-                    # 4桁の数値コード（株式）のみ対象
                     if len(code_raw) == 4 and code_raw.isdigit():
                         market = str(row.get('市場・商品区分', ''))
                         if any(m in market for m in ['プライム', 'スタンダード', 'グロース', '市場']):
@@ -63,18 +59,23 @@ def get_jpx_stock_list_auto(limit: int = 300):
                     continue
         print(f"✅ JPXから {len(stock_dict)} 銘柄を取得しました。")
     except Exception as e:
-        print(f"⚠️ JPX自動取得エラー ({e})。予備の主要銘柄リストを使用します。")
-        # フォールバック用の主要銘柄
-        backup_codes = ["6857", "8035", "6146", "9984", "7011", "6526", "1570", "6758", "7203", "8306", "9104", "8002", "6367", "6920", "7735", "4528", "2413", "4385", "5253", "9166"]
-        stock_dict = {code: f"銘柄 {code}" for code in backup_codes}
+        print(f"⚠️ JPX取得スキップ ({e})。予備の人気銘柄リストを使用します。")
+        backup_codes = {
+            "6857": "アドバンテスト", "8035": "東京エレクトロン", "6146": "ディスコ", 
+            "9984": "ソフトバンクG", "7011": "三菱重工", "6526": "ソシオネクスト", 
+            "1570": "日経レバ", "6758": "ソニーG", "7203": "トヨタ", "8306": "三菱UFJ",
+            "9104": "商船三井", "8002": "丸紅", "6367": "ダイキン", "6920": "レーザーテック",
+            "7735": "スクリン", "4528": "小野薬品", "2413": "エムスリー", "4385": "メルカリ",
+            "5253": "カバー", "9166": "GENDA", "5595": "QPS研究所", "1357": "日経ダブルインバ",
+            "1579": "日経ブル2倍", "7267": "ホンダ", "8316": "三井住友", "8411": "みずほ",
+            "9432": "NTT", "9433": "KDDI", "7974": "任天堂", "6098": "リクルート"
+        }
+        stock_dict = backup_codes
 
     return stock_dict
 
 @app.get("/api/signals")
 def get_signals(limit: int = 200, min_price: float = 1500.0, max_price: float = 8000.0):
-    """
-    JPX全銘柄自動取得 ＆ 株価フィルター（15万〜80万円 / 1,500円〜8,000円）
-    """
     stock_targets = get_jpx_stock_list_auto(limit=limit)
     ticker_symbols = [f"{code}.T" for code in stock_targets.keys()]
     
@@ -83,7 +84,7 @@ def get_signals(limit: int = 200, min_price: float = 1500.0, max_price: float = 
         return JSONResponse(content=[])
 
     try:
-        print(f"📊 {len(ticker_symbols)} 銘柄の株価データをダウンロード中...")
+        print(f"📊 {len(ticker_symbols)} 銘柄のデータ取得中...")
         batch_data = yf.download(
             tickers=ticker_symbols,
             period="5d",
@@ -93,7 +94,7 @@ def get_signals(limit: int = 200, min_price: float = 1500.0, max_price: float = 
             progress=False
         )
     except Exception as e:
-        print(f"❌ 株価データダウンロードエラー: {e}")
+        print(f"❌ データ取得エラー: {e}")
         return JSONResponse(content=[])
 
     for code, name in stock_targets.items():
@@ -106,13 +107,13 @@ def get_signals(limit: int = 200, min_price: float = 1500.0, max_price: float = 
             else:
                 df_5m = batch_data.dropna(how="all")
 
-            if df_5m.empty or len(df_5m) < 20:
+            if df_5m.empty or len(df_5m) < 10:
                 continue
 
             c0 = df_5m.iloc[-1]
             close_p = safe_float(c0['Close'])
 
-            # 株価フィルター（100株＝15万円〜80万円 ＝ 株価 1,500円〜8,000円）
+            # 株価フィルター (100株あたり 15万〜80万円 ＝ 株価 1,500円〜8,000円)
             if not (min_price <= close_p <= max_price):
                 continue
 
@@ -135,7 +136,7 @@ def get_signals(limit: int = 200, min_price: float = 1500.0, max_price: float = 
             patterns = []
             score = 0
 
-            # テクニカル分析パターン判定
+            # チャートパターン判定
             body_size = abs(close_p - open_p)
             upper_wick = high_p - max(open_p, close_p)
             
@@ -179,7 +180,7 @@ def get_signals(limit: int = 200, min_price: float = 1500.0, max_price: float = 
                     "take_profit": round(close_p * 0.975, 1)
                 })
 
-        except Exception as e:
+        except Exception:
             continue
 
     results = sorted(results, key=lambda x: x['score'], reverse=True)
@@ -190,27 +191,9 @@ def get_chart_data(code: str):
     try:
         formatted_ticker = f"{code}.T"
         stock = yf.Ticker(formatted_ticker)
-        
-        earnings_date = "未定"
-        ex_dividend_date = "なし/未定"
-        try:
-            cal = stock.calendar
-            if isinstance(cal, dict):
-                if 'Earnings Date' in cal and len(cal['Earnings Date']) > 0:
-                    earnings_date = pd.to_datetime(cal['Earnings Date'][0]).strftime('%Y-%m-%d')
-                if 'Ex-Dividend Date' in cal and cal['Ex-Dividend Date']:
-                    ex_dividend_date = pd.to_datetime(cal['Ex-Dividend Date']).strftime('%Y-%m-%d')
-            elif isinstance(cal, pd.DataFrame) and not cal.empty:
-                if 'Earnings Date' in cal.index:
-                    earnings_date = pd.to_datetime(cal.loc['Earnings Date'].iloc[0]).strftime('%Y-%m-%d')
-                if 'Ex-Dividend Date' in cal.index:
-                    ex_dividend_date = pd.to_datetime(cal.loc['Ex-Dividend Date'].iloc[0]).strftime('%Y-%m-%d')
-        except Exception:
-            pass
-
         df_5m = stock.history(period="5d", interval="5m")
         if df_5m.empty:
-            return JSONResponse(content={"candles": [], "vwap": [], "earnings_date": earnings_date, "ex_dividend_date": ex_dividend_date})
+            return JSONResponse(content={"candles": [], "vwap": [], "earnings_date": "未定", "ex_dividend_date": "なし/未定"})
 
         df_5m['TP'] = (df_5m['High'] + df_5m['Low'] + df_5m['Close']) / 3
         df_5m['PV'] = df_5m['TP'] * df_5m['Volume']
@@ -237,13 +220,15 @@ def get_chart_data(code: str):
         return JSONResponse(content={
             "candles": candles,
             "vwap": vwap_list,
-            "earnings_date": earnings_date,
-            "ex_dividend_date": ex_dividend_date
+            "earnings_date": "未定",
+            "ex_dividend_date": "なし/未定"
         })
-    except Exception as e:
+    except Exception:
         return JSONResponse(content={"candles": [], "vwap": [], "earnings_date": "未定", "ex_dividend_date": "なし/未定"})
 
+# GETとHEADの両方を許可（Renderのヘルスチェックエラー対策）
 @app.get("/")
+@app.head("/")
 def get_index():
     if os.path.exists("index.html"):
         with open("index.html", "r", encoding="utf-8") as f:
