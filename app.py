@@ -52,7 +52,7 @@ def get_jpx_stock_list(limit: int = 100):
             "7203": "トヨタ自動車", "8306": "三菱UFJ", "6758": "ソニーG", "6723": "ルネサス"
         }
 
-def fetch_jpx_data(ticker_symbol: str, interval: str = "1d", period: str = "3mo") -> pd.DataFrame:
+def fetch_jpx_data(ticker_symbol: str, interval: str = "5m", period: str = "5d") -> pd.DataFrame:
     formatted_ticker = f"{ticker_symbol}.T" if not ticker_symbol.endswith(".T") else ticker_symbol
     try:
         stock = yf.Ticker(formatted_ticker)
@@ -68,69 +68,70 @@ def get_signals():
     
     for code, name in stock_targets.items():
         try:
-            # --- 1. 日足分析 ---
-            df_daily = fetch_jpx_data(code, interval="1d", period="3mo")
-            if df_daily.empty or len(df_daily) < 25:
+            # 5分足データの取得
+            df_5m = fetch_jpx_data(code, interval="5m", period="5d")
+            if df_5m.empty or len(df_5m) < 10:
                 continue
 
-            df_daily['SMA25'] = df_daily['Close'].rolling(window=25).mean()
-            latest_close = df_daily['Close'].iloc[-1]
-            latest_sma25 = df_daily['SMA25'].iloc[-1]
+            # VWAPの計算
+            df_5m['TP'] = (df_5m['High'] + df_5m['Low'] + df_5m['Close']) / 3
+            df_5m['PV'] = df_5m['TP'] * df_5m['Volume']
+            df_5m['Date'] = df_5m.index.date
+            cum_pv = df_5m.groupby('Date')['PV'].cumsum()
+            cum_vol = df_5m.groupby('Date')['Volume'].cumsum()
+            df_5m['VWAP'] = cum_pv / cum_vol
             
-            dev_rate = ((latest_close - latest_sma25) / latest_sma25) * 100 if latest_sma25 else 0
+            # 直近2本のローソク足を取得
+            prev_candle = df_5m.iloc[-2]
+            curr_candle = df_5m.iloc[-1]
 
-            delta = df_daily['Close'].diff()
-            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-            rs = gain / loss
-            rsi = 100 - (100 / (1 + rs))
-            latest_rsi = rsi.iloc[-1]
+            open_p  = curr_candle['Open']
+            close_p = curr_candle['Close']
+            high_p  = curr_candle['High']
+            low_p   = curr_candle['Low']
+            vwap_val = safe_float(curr_candle['VWAP'])
 
-            # --- 2. 5分足分析 ---
-            df_5m = fetch_jpx_data(code, interval="5m", period="5d")
-            vwap_val = 0
-            vwap_status = "通常"
-            
-            if not df_5m.empty and len(df_5m) >= 5:
-                df_5m['TP'] = (df_5m['High'] + df_5m['Low'] + df_5m['Close']) / 3
-                df_5m['PV'] = df_5m['TP'] * df_5m['Volume']
-                df_5m['Date'] = df_5m.index.date
-                cum_pv = df_5m.groupby('Date')['PV'].cumsum()
-                cum_vol = df_5m.groupby('Date')['Volume'].cumsum()
-                df_5m['VWAP'] = cum_pv / cum_vol
-                
-                latest_5m = df_5m.iloc[-1]
-                vwap_val = safe_float(latest_5m['VWAP'])
-                
-                if latest_5m['Close'] < vwap_val:
-                    vwap_status = "VWAP下回り"
-                else:
-                    vwap_status = "VWAP上回り"
+            p_open_p  = prev_candle['Open']
+            p_close_p = prev_candle['Close']
 
-            # --- 3. 総合判定 ---
-            is_overheated = (dev_rate >= 8.0) or (latest_rsi >= 65.0)
-            is_vwap_below = (vwap_status == "VWAP下回り")
+            # --- チャートの形 判定ロジック ---
+            body_size = abs(close_p - open_p)              # 実体の長さ
+            upper_wick = high_p - max(open_p, close_p)    # 上ヒゲの長さ
 
-            if is_overheated and is_vwap_below:
-                judgment = "🚨 空売りシグナル（過熱＋VWAP割れ）"
-            elif is_overheated:
-                judgment = "🟡 高値圏（監視）"
-            elif is_vwap_below:
+            # パターン1: 長い上ヒゲ（実体の2倍以上の上ヒゲ）
+            is_upper_wick = (upper_wick >= body_size * 2) and (upper_wick > 0)
+
+            # パターン2: 陰線包み足（前回の陽線を今回の大きな陰線が包み込む）
+            is_prev_bull = p_close_p > p_open_p
+            is_curr_bear = close_p < open_p
+            is_engulfing = is_prev_bull and is_curr_bear and (open_p >= p_close_p) and (close_p <= p_open_p)
+
+            # 条件: VWAPより下に位置しているか
+            is_below_vwap = close_p < vwap_val
+
+            # --- 総合判定 ---
+            if is_below_vwap and is_upper_wick:
+                judgment = "🚨 天井サイン（長い上ヒゲ＋VWAP割れ）"
+            elif is_below_vwap and is_engulfing:
+                judgment = "🚨 転換サイン（包み足＋VWAP割れ）"
+            elif is_below_vwap:
                 judgment = "🔹 VWAP下回り"
+            elif is_upper_wick:
+                judgment = "🟡 天井気配（上ヒゲあり・VWAP上）"
             else:
                 judgment = "⚪️ 通常"
 
             results.append({
                 "code": code,
                 "name": name,
-                "price": round(safe_float(latest_close), 1),
+                "price": round(safe_float(close_p), 1),
                 "vwap": round(vwap_val, 1),
-                "daily_dev": round(safe_float(dev_rate), 2),
-                "daily_rsi": round(safe_float(latest_rsi), 2),
-                "signal_timing": vwap_status,
+                "daily_dev": 0,  # 非表示用互換
+                "daily_rsi": 0,  # 非表示用互換
+                "signal_timing": "VWAP下回り" if is_below_vwap else "VWAP上回り",
                 "daily_judgment": judgment,
-                "stop_loss": round(safe_float(latest_close) * 1.015),
-                "take_profit": round(safe_float(latest_close) * 0.98)
+                "stop_loss": round(safe_float(close_p) * 1.015),
+                "take_profit": round(safe_float(close_p) * 0.98)
             })
         except Exception as e:
             print(f"銘柄スキップ {code}: {e}")
