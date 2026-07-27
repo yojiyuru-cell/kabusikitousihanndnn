@@ -61,6 +61,13 @@ def fetch_jpx_data(ticker_symbol: str, interval: str = "5m", period: str = "5d")
     except Exception:
         return pd.DataFrame()
 
+def calculate_rsi(series: pd.Series, period: int = 14) -> pd.Series:
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
 @app.get("/api/signals")
 def get_signals():
     stock_targets = get_jpx_stock_list(limit=100)
@@ -69,95 +76,80 @@ def get_signals():
     for code, name in stock_targets.items():
         try:
             df_5m = fetch_jpx_data(code, interval="5m", period="5d")
-            if df_5m.empty or len(df_5m) < 15:
+            if df_5m.empty or len(df_5m) < 20:
                 continue
 
-            # VWAPの計算
+            # VWAP & 移動平均線 & RSIの計算
             df_5m['TP'] = (df_5m['High'] + df_5m['Low'] + df_5m['Close']) / 3
             df_5m['PV'] = df_5m['TP'] * df_5m['Volume']
             df_5m['Date'] = df_5m.index.date
             cum_pv = df_5m.groupby('Date')['PV'].cumsum()
             cum_vol = df_5m.groupby('Date')['Volume'].cumsum()
             df_5m['VWAP'] = cum_pv / cum_vol
-            
-            # 本日のデータのみ抽出
-            latest_date = df_5m['Date'].iloc[-1]
-            df_today = df_5m[df_5m['Date'] == latest_date]
-            if len(df_today) < 3:
-                continue
 
-            # 1. 本日の騰落率（前日終値または始値比での急騰判定）
-            open_today = df_today['Open'].iloc[0]
-            curr_candle = df_today.iloc[-1]
-            prev_candle = df_today.iloc[-2]
+            df_5m['SMA5'] = df_5m['Close'].rolling(window=5).mean()
+            df_5m['SMA20'] = df_5m['Close'].rolling(window=20).mean()
+            df_5m['RSI'] = calculate_rsi(df_5m['Close'], 14)
 
-            close_p = curr_candle['Close']
-            open_p = curr_candle['Open']
-            high_p = curr_candle['High']
-            low_p = curr_candle['Low']
-            vol_p = curr_candle['Volume']
-            vwap_val = safe_float(curr_candle['VWAP'])
+            curr = df_5m.iloc[-1]
+            prev = df_5m.iloc[-2]
 
-            prev_close_p = prev_candle['Close']
-            prev_vwap_val = safe_float(prev_candle['VWAP'])
-            avg_vol = df_today['Volume'].tail(10).mean()
+            close_p = curr['Close']
+            open_p = curr['Open']
+            high_p = curr['High']
+            low_p = curr['Low']
+            vwap_val = safe_float(curr['VWAP'])
+            rsi_val = safe_float(curr['RSI'], 50.0)
 
-            # 条件A: 本日の高値圏・急騰（始値比+2.5%以上、または高値からの押し）
-            day_gain = ((high_p - open_today) / open_today) * 100
-            is_surging = day_gain >= 2.5
+            # --- 下落シグナル判定 ---
+            drop_reasons = []
+            score = 0
 
-            # 条件B: VWAPクロス（前回はVWAP上 ➔ 今回はVWAP下割れ）
-            is_vwap_break = (prev_close_p >= prev_vwap_val) and (close_p < vwap_val)
+            # 条件1: 急騰後のVWAP割れ
+            if close_p < vwap_val and prev['Close'] >= safe_float(prev['VWAP']):
+                drop_reasons.append("急騰後VWAP下抜け")
+                score += 3
 
-            # 条件C: 戻り売りパターン（すでにVWAP下で、高値でVWAPにタッチして反発失敗）
-            is_vwap_retest = (close_p < vwap_val) and (high_p >= vwap_val * 0.998) and (close_p < open_p)
+            # 条件2: デッドクロス（SMA5がSMA20を下抜け）
+            if prev['SMA5'] >= prev['SMA20'] and curr['SMA5'] < curr['SMA20']:
+                drop_reasons.append("5分足デッドクロス")
+                score += 2
 
-            # 条件D: 出来高伴う（急騰・急落時の出来高増加）
-            is_volume_spike = vol_p > (avg_vol * 1.3)
+            # 条件3: RSI高値警戒からの反落
+            if safe_float(prev['RSI']) > 65 and rsi_val < safe_float(prev['RSI']):
+                drop_reasons.append("RSI高値反落")
+                score += 2
 
-            # 条件E: チャート形状（上ヒゲピンバー）
+            # 条件4: 長い上ヒゲ（実体の1.5倍以上のヒゲ）
             body_size = abs(close_p - open_p)
             upper_wick = high_p - max(open_p, close_p)
-            is_upper_wick = (upper_wick >= body_size * 1.8) and (upper_wick > 0)
+            if upper_wick >= body_size * 1.5 and upper_wick > 0:
+                drop_reasons.append("上ヒゲ（売り圧力強）")
+                score += 2
 
-            # --- 勝ち筋シグナル判定 ---
-            judgment = "⚪️ 監視対象外"
-            priority = 0
-
-            if is_surging and is_vwap_break and is_volume_spike:
-                judgment = "🔥 超強力：急騰後VWAPブレイク（成り行き売り）"
-                priority = 3
-            elif is_surging and is_vwap_retest and is_upper_wick:
-                judgment = "🚨 高勝率：VWAP戻り売り失敗（上ヒゲピンバー）"
-                priority = 3
-            elif is_surging and (close_p < vwap_val):
-                judgment = "⚡️ 空売りチャンス（急騰後のVWAP割り込み）"
-                priority = 2
-            elif is_surging and (close_p >= vwap_val):
-                judgment = "🟡 急騰高値圏（VWAP割れ待ち）"
-                priority = 1
-
-            if priority > 0:
-                # 損切り：エントリー価格 +1.2%（またはVWAP上抜け）
-                # 利確：エントリー価格 -2.5%
+            # シグナルが出ている銘柄のみ抽出
+            if score > 0 or close_p < vwap_val:
+                judgment = "🚨 強力下落サイン" if score >= 4 else ("⚠️ 下落注意" if score >= 2 else "🔹 弱含み")
+                
                 results.append({
                     "code": code,
                     "name": name,
                     "price": round(safe_float(close_p), 1),
                     "vwap": round(vwap_val, 1),
-                    "gain": round(day_gain, 1),
+                    "rsi": round(rsi_val, 1),
+                    "score": score,
+                    "reasons": " / ".join(drop_reasons) if drop_reasons else "VWAP下回り",
                     "judgment": judgment,
-                    "priority": priority,
-                    "stop_loss": round(safe_float(close_p) * 1.012, 1),
-                    "take_profit": round(safe_float(close_p) * 0.975, 1)
+                    "stop_loss": round(safe_float(close_p) * 1.015, 1),
+                    "take_profit": round(safe_float(close_p) * 0.98, 1)
                 })
 
         except Exception as e:
             print(f"銘柄スキップ {code}: {e}")
             continue
 
-    # シグナルの優先度（高い順）にソートして返却
-    results = sorted(results, key=lambda x: x['priority'], reverse=True)
+    # 下落スコアが高い順に並び替え
+    results = sorted(results, key=lambda x: x['score'], reverse=True)
     return JSONResponse(content=results)
 
 @app.get("/api/chart/{code}")
