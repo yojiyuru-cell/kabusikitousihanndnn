@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>株価下落スコープ・ダッシュボード</title>
+    <title>資金指定(15〜80万円) 5分足チャートパターンスキャナー</title>
     <script src="https://unpkg.com/lightweight-charts@3.8.0/dist/lightweight-charts.standalone.production.js"></script>
     <style>
         body {
@@ -14,38 +14,67 @@
             padding: 20px;
         }
         h1 { color: #ff5252; font-size: 24px; margin-bottom: 5px; }
-        .subtitle { color: #a8a8b3; font-size: 13px; margin-bottom: 20px; }
+        .subtitle { color: #a8a8b3; font-size: 13px; margin-bottom: 15px; }
+        .controls { margin-bottom: 15px; display: flex; gap: 15px; align-items: center; background: #202024; padding: 10px 15px; border-radius: 6px; }
+        select, input, button { background: #121214; color: #fff; border: 1px solid #3e3e42; padding: 6px 10px; border-radius: 4px; }
+        button { background: #3b82f6; border: none; cursor: pointer; font-weight: bold; }
+        button:hover { background: #2563eb; }
         .container { display: flex; gap: 20px; flex-wrap: wrap; }
         .left-panel { flex: 1; min-width: 650px; background: #202024; border-radius: 8px; padding: 16px; }
         .right-panel { width: 450px; background: #202024; border-radius: 8px; padding: 16px; }
         table { width: 100%; border-collapse: collapse; font-size: 13px; }
-        th, td { padding: 10px; text-align: left; border-bottom: 1px solid #2e2e32; }
+        th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid #2e2e32; }
         th { background-color: #121214; color: #a8a8b3; }
         tr:hover { background-color: #29292e; cursor: pointer; }
         .badge-danger { background-color: #ff5252; color: white; padding: 3px 6px; border-radius: 4px; font-weight: bold; }
         .badge-warning { background-color: #ff9800; color: black; padding: 3px 6px; border-radius: 4px; font-weight: bold; }
         .badge-info { color: #29b6f6; }
+        .price-tag { color: #ffd54f; font-weight: bold; }
         #chart { width: 100%; height: 350px; margin-top: 10px; }
         .loading { color: #e1a100; font-weight: bold; }
-        .guide-box { background: #18181b; padding: 10px; border-radius: 6px; margin-top: 10px; font-size: 13px; }
+        .guide-box { background: #18181b; padding: 12px; border-radius: 6px; margin-top: 10px; font-size: 13px; line-height: 1.6; }
     </style>
 </head>
 <body>
 
-    <h1>📉 株価下落銘柄ピックアップ・スコープ</h1>
-    <div class="subtitle">VWAP割り込み、デッドクロス、RSI反落など下落根拠が重なる銘柄を抽出</div>
+    <h1>📉 投資資金15〜80万円用 5分足スキャナー</h1>
+    <div class="subtitle">100株購入の目安資金が15万〜80万円（株価1,500〜8,000円）の銘柄に絞って下落パターンを検知</div>
+
+    <div class="controls">
+        <label>最低資金: 
+            <select id="min-price">
+                <option value="1500" selected>15万円 (1,500円)</option>
+                <option value="1000">10万円 (1,000円)</option>
+                <option value="2000">20万円 (2,000円)</option>
+            </select>
+        </label>
+        <label>上限資金: 
+            <select id="max-price">
+                <option value="8000" selected>80万円 (8,000円)</option>
+                <option value="5000">50万円 (5,000円)</option>
+                <option value="10000">100万円 (10,000円)</option>
+            </select>
+        </label>
+        <label>スキャン数: 
+            <select id="limit-select">
+                <option value="300" selected>300 銘柄</option>
+                <option value="500">500 銘柄</option>
+            </select>
+        </label>
+        <button onclick="fetchSignals()">適用＆スキャン</button>
+    </div>
 
     <div class="container">
         <div class="left-panel">
-            <h2>下落検出銘柄一覧</h2>
-            <p id="status-msg" class="loading">データを取得中...</p>
+            <h2>条件に合致した候補銘柄</h2>
+            <p id="status-msg" class="loading">フィルタリング・スキャン中...</p>
             <table>
                 <thead>
                     <tr>
                         <th>コード/銘柄</th>
                         <th>現在値</th>
-                        <th>VWAP</th>
-                        <th>下落根拠 / パターン</th>
+                        <th>必要資金(100株)</th>
+                        <th>検出パターン</th>
                         <th>判定</th>
                     </tr>
                 </thead>
@@ -56,8 +85,10 @@
         <div class="right-panel">
             <h2 id="chart-title">銘柄を選択してください</h2>
             <div id="trade-guide" class="guide-box" style="display:none;">
-                損切り目安: <b id="stop-val" style="color:#ff5252;">-</b> | 
-                目標利確: <b id="profit-val" style="color:#00e676;">-</b>
+                <div>次回決算日: <b id="info-earnings" style="color:#ffb74d;">取得中...</b></div>
+                <div>権利落/配当日: <b id="info-dividend" style="color:#81c784;">取得中...</b></div>
+                <hr style="border-color:#2e2e32; margin: 8px 0;">
+                <div>損切り目安: <b id="stop-val" style="color:#ff5252;">-</b> | 目標利確: <b id="profit-val" style="color:#00e676;">-</b></div>
             </div>
             <div id="chart"></div>
         </div>
@@ -81,6 +112,8 @@
         async function loadChart(item) {
             document.getElementById('chart-title').innerText = `${item.code} ${item.name} (5分足)`;
             document.getElementById('trade-guide').style.display = 'block';
+            document.getElementById('info-earnings').innerText = "取得中...";
+            document.getElementById('info-dividend').innerText = "取得中...";
             document.getElementById('stop-val').innerText = `${item.stop_loss}円`;
             document.getElementById('profit-val').innerText = `${item.take_profit}円`;
 
@@ -89,6 +122,10 @@
             try {
                 const res = await fetch(`/api/chart/${item.code}`);
                 const data = await res.json();
+                
+                document.getElementById('info-earnings').innerText = data.earnings_date || "未定";
+                document.getElementById('info-dividend').innerText = data.ex_dividend_date || "なし/未定";
+
                 if (data.candles && data.candles.length > 0) {
                     candleSeries.setData(data.candles);
                     vwapSeries.setData(data.vwap || []);
@@ -98,13 +135,20 @@
         }
 
         async function fetchSignals() {
+            const limit = document.getElementById('limit-select').value;
+            const minPrice = document.getElementById('min-price').value;
+            const maxPrice = document.getElementById('max-price').value;
+
+            document.getElementById('status-msg').innerText = `100株あたり ${minPrice/1000}万〜${maxPrice/1000}万円の銘柄を抽出中...`;
+            document.getElementById('status-msg').className = 'loading';
+
             try {
-                const res = await fetch('/api/signals');
+                const res = await fetch(`/api/signals?limit=${limit}&min_price=${minPrice}&max_price=${maxPrice}`);
                 const data = await res.json();
                 const tbody = document.getElementById('signal-list');
                 tbody.innerHTML = '';
 
-                document.getElementById('status-msg').innerText = `更新完了: ${data.length} 銘柄を検出`;
+                document.getElementById('status-msg').innerText = `スキャン完了: ${data.length} 銘柄を検出`;
                 document.getElementById('status-msg').className = '';
 
                 data.forEach(item => {
@@ -118,8 +162,8 @@
                     tr.innerHTML = `
                         <td><strong>${item.code}</strong><br><small>${item.name}</small></td>
                         <td>${item.price.toLocaleString()}円</td>
-                        <td>${item.vwap.toLocaleString()}円</td>
-                        <td><small>${item.reasons}</small></td>
+                        <td class="price-tag">約 ${(item.investment_required / 10000).toFixed(1)} 万円</td>
+                        <td><small>${item.patterns}</small></td>
                         <td><span class="${badge}">${item.judgment}</span></td>
                     `;
                     tbody.appendChild(tr);
