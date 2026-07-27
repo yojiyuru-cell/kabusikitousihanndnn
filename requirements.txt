@@ -5,3 +5,4 @@ pandas
 numpy
 openpyxl
 xlrd
+requests
