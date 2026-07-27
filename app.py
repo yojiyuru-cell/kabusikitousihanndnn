@@ -28,7 +28,6 @@ def safe_float(val, default=0.0):
     except Exception:
         return default
 
-# JPXから全銘柄リストを取得（制限数を維持）
 def get_jpx_stock_list_auto(limit: int = 150):
     POPULAR_STOCKS = {
         "6857": "アドバンテスト", "8035": "東京エレクトロン", "6146": "ディスコ", 
@@ -72,10 +71,10 @@ def get_signals(limit: int = 150, min_price: float = 1500.0, max_price: float = 
         return JSONResponse(content=[])
 
     try:
-        # 高速化：期間を2d（直近2日）にしつつ全銘柄をマルチスレッドで一括並列取得
+        # 安定取得のため period="5d" に変更
         batch_data = yf.download(
             tickers=ticker_symbols,
-            period="2d",
+            period="5d",
             interval="5m",
             group_by="ticker",
             threads=True,
@@ -95,12 +94,13 @@ def get_signals(limit: int = 150, min_price: float = 1500.0, max_price: float = 
             else:
                 df_5m = batch_data.dropna(how="all")
 
-            if df_5m.empty or len(df_5m) < 15:
+            # 判定基準を5本以上に緩和
+            if df_5m.empty or len(df_5m) < 5:
                 continue
 
             c0 = df_5m.iloc[-1]
-            c1 = df_5m.iloc[-2]
-            c2 = df_5m.iloc[-3]
+            c1 = df_5m.iloc[-2] if len(df_5m) >= 2 else c0
+            c2 = df_5m.iloc[-3] if len(df_5m) >= 3 else c0
 
             close_p = safe_float(c0['Close'])
 
@@ -120,7 +120,7 @@ def get_signals(limit: int = 150, min_price: float = 1500.0, max_price: float = 
             high_p   = safe_float(c0['High'])
             low_p    = safe_float(c0['Low'])
             vwap_val = safe_float(df_5m['VWAP'].iloc[-1])
-            prev_vwap = safe_float(df_5m['VWAP'].iloc[-2])
+            prev_vwap = safe_float(df_5m['VWAP'].iloc[-2]) if len(df_5m) >= 2 else vwap_val
 
             patterns = []
             score = 0
@@ -128,7 +128,7 @@ def get_signals(limit: int = 150, min_price: float = 1500.0, max_price: float = 
             # --- 空売りシグナル判定 ---
             body_size = abs(close_p - open_p)
             upper_wick = high_p - max(open_p, close_p)
-            if upper_wick >= max(body_size * 2, 5.0):
+            if upper_wick >= max(body_size * 1.5, 3.0):
                 patterns.append("長い上ヒゲ（天井打）")
                 score += 3
 
@@ -136,13 +136,14 @@ def get_signals(limit: int = 150, min_price: float = 1500.0, max_price: float = 
                 patterns.append("陰線包み足（強反落）")
                 score += 3
 
-            recent_15 = df_5m.tail(15)
-            highs = recent_15['High'].nlargest(2).values
-            if len(highs) == 2 and abs(highs[0] - highs[1]) / (highs[0] + 1e-5) < 0.003:
-                recent_low_mean = recent_15['Low'].mean()
-                if close_p < recent_low_mean:
-                    patterns.append("ダブルトップ崩れ")
-                    score += 4
+            if len(df_5m) >= 15:
+                recent_15 = df_5m.tail(15)
+                highs = recent_15['High'].nlargest(2).values
+                if len(highs) == 2 and abs(highs[0] - highs[1]) / (highs[0] + 1e-5) < 0.005:
+                    recent_low_mean = recent_15['Low'].mean()
+                    if close_p < recent_low_mean:
+                        patterns.append("ダブルトップ崩れ")
+                        score += 4
 
             if (c1['Close'] >= prev_vwap) and (close_p < vwap_val):
                 patterns.append("VWAP下抜け（デッドクロス）")
@@ -194,7 +195,7 @@ def get_chart_data(code: str):
     try:
         formatted_ticker = f"{code}.T"
         stock = yf.Ticker(formatted_ticker)
-        df_5m = stock.history(period="2d", interval="5m")
+        df_5m = stock.history(period="5d", interval="5m")
         if df_5m.empty:
             return JSONResponse(content={"candles": [], "vwap": [], "earnings_date": "未定", "ex_dividend_date": "なし/未定"})
 
