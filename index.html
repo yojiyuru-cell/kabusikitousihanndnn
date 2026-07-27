@@ -4,7 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>空売りシグナル・ダッシュボード</title>
-    <!-- チャートライブラリのバージョンを3.8.0に固定してエラーを回避 -->
     <script src="https://unpkg.com/lightweight-charts@3.8.0/dist/lightweight-charts.standalone.production.js"></script>
     <style>
         body {
@@ -75,22 +74,20 @@
 </head>
 <body>
 
-    <h1>📉 日本株 空売りスキャン・ダッシュボード</h1>
+    <h1>📉 チャート形状スキャン・空売りダッシュボード</h1>
 
     <div class="container">
         <!-- 左側: シグナル銘柄一覧 -->
         <div class="left-panel">
             <h2>スキャン対象銘柄</h2>
-            <p id="status-msg" class="loading">データを取得中（全銘柄スキャンには数十秒かかります）...</p>
+            <p id="status-msg" class="loading">データを取得中...</p>
             <table>
                 <thead>
                     <tr>
                         <th>コード/銘柄</th>
                         <th>現在値</th>
                         <th>VWAP</th>
-                        <th>25日乖離率</th>
-                        <th>RSI</th>
-                        <th>状態/シグナル</th>
+                        <th>判定パターン / シグナル</th>
                     </tr>
                 </thead>
                 <tbody id="signal-list">
@@ -190,17 +187,14 @@
 
                     const priceStr = item.price ? item.price.toLocaleString() : '-';
                     const vwapStr = item.vwap ? item.vwap.toLocaleString() : '-';
-                    const devVal = item.daily_dev ?? 0;
-                    const rsiVal = item.daily_rsi ?? 0;
                     const judgmentStr = item.daily_judgment || '⚪️ 通常';
+                    const isSignal = judgmentStr.includes('🚨');
 
                     tr.innerHTML = `
                         <td><strong>${item.code}</strong><br><small>${item.name}</small></td>
                         <td>${priceStr}円</td>
                         <td>${vwapStr}円</td>
-                        <td class="${devVal >= 8 ? 'overheated' : ''}">${devVal}%</td>
-                        <td class="${rsiVal >= 65 ? 'overheated' : ''}">${rsiVal}</td>
-                        <td><span class="signal-badge">${judgmentStr}</span></td>
+                        <td><span class="signal-badge ${isSignal ? 'overheated' : ''}">${judgmentStr}</span></td>
                     `;
                     tbody.appendChild(tr);
                 });
