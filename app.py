@@ -1,5 +1,7 @@
 import os
 import math
+import requests
+import io
 import pandas as pd
 import yfinance as yf
 from fastapi import FastAPI
@@ -26,45 +28,62 @@ def safe_float(val, default=0.0):
     except Exception:
         return default
 
-# デイトレ・スイングで人気のある主要・中大型銘柄のコードリスト
-POPULAR_CODES = [
-    "6857", "8035", "6146", "9984", "7011", "6526", "1570", "6758", "7203", "8306",
-    "9104", "8002", "6367", "6920", "7735", "4528", "2413", "4385", "5253", "9166",
-    "5595", "1357", "1579", "7267", "8316", "8411", "9432", "9433", "7974", "6098",
-    "4063", "6902", "6501", "7751", "6702", "7270", "4502", "4519", "4568", "6861"
-]
-
-def get_target_stock_list(limit: int = 300):
-    url = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xls"
+# JPX（日本取引所グループ）から全上場銘柄リストを自動取得する関数
+def get_jpx_stock_list_auto(limit: int = 300):
+    jpx_url = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xls"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+    }
+    
     stock_dict = {}
     try:
-        df = pd.read_excel(url)
-        df_stocks = df[['コード', '銘柄名', '市場・商品区分']].dropna()
-        for _, row in df_stocks.iterrows():
-            code = str(int(row['コード']))
-            name = str(row['銘柄名'])
-            market = str(row['市場・商品区分'])
-            if any(m in market for m in ['プライム', 'スタンダード', 'グロース']):
-                stock_dict[code] = name
-                if len(stock_dict) >= limit:
-                    break
-    except Exception:
-        stock_dict = {code: f"銘柄 {code}" for code in POPULAR_CODES}
-    
+        print("📥 JPX公式サイトから最新の全銘柄リストを自動取得中...")
+        res = requests.get(jpx_url, headers=headers, timeout=10)
+        res.raise_for_status()
+        
+        # Excelファイルの読み込み
+        df = pd.read_excel(io.BytesIO(res.content))
+        
+        # 必要なカラムの抽出 (コード, 銘柄名, 市場・商品区分)
+        if 'コード' in df.columns and '銘柄名' in df.columns:
+            # 内国株式（プライム、スタンダード、グロース）のみ抽出
+            df_stocks = df.dropna(subset=['コード', '銘柄名'])
+            
+            for _, row in df_stocks.iterrows():
+                try:
+                    code_raw = str(row['コード']).split('.')[0].strip()
+                    # 4桁の数値コード（株式）のみ対象
+                    if len(code_raw) == 4 and code_raw.isdigit():
+                        market = str(row.get('市場・商品区分', ''))
+                        if any(m in market for m in ['プライム', 'スタンダード', 'グロース', '市場']):
+                            stock_dict[code_raw] = str(row['銘柄名']).strip()
+                            if len(stock_dict) >= limit:
+                                break
+                except Exception:
+                    continue
+        print(f"✅ JPXから {len(stock_dict)} 銘柄を取得しました。")
+    except Exception as e:
+        print(f"⚠️ JPX自動取得エラー ({e})。予備の主要銘柄リストを使用します。")
+        # フォールバック用の主要銘柄
+        backup_codes = ["6857", "8035", "6146", "9984", "7011", "6526", "1570", "6758", "7203", "8306", "9104", "8002", "6367", "6920", "7735", "4528", "2413", "4385", "5253", "9166"]
+        stock_dict = {code: f"銘柄 {code}" for code in backup_codes}
+
     return stock_dict
 
 @app.get("/api/signals")
-def get_signals(limit: int = 300, min_price: float = 1500.0, max_price: float = 8000.0):
+def get_signals(limit: int = 200, min_price: float = 1500.0, max_price: float = 8000.0):
     """
-    min_price: 15万円 (100株 = 1,500円)
-    max_price: 80万円 (100株 = 8,000円)
+    JPX全銘柄自動取得 ＆ 株価フィルター（15万〜80万円 / 1,500円〜8,000円）
     """
-    stock_targets = get_target_stock_list(limit=limit)
+    stock_targets = get_jpx_stock_list_auto(limit=limit)
     ticker_symbols = [f"{code}.T" for code in stock_targets.keys()]
     
     results = []
+    if not ticker_symbols:
+        return JSONResponse(content=[])
 
     try:
+        print(f"📊 {len(ticker_symbols)} 銘柄の株価データをダウンロード中...")
         batch_data = yf.download(
             tickers=ticker_symbols,
             period="5d",
@@ -74,7 +93,7 @@ def get_signals(limit: int = 300, min_price: float = 1500.0, max_price: float = 
             progress=False
         )
     except Exception as e:
-        print(f"データダウンロードエラー: {e}")
+        print(f"❌ 株価データダウンロードエラー: {e}")
         return JSONResponse(content=[])
 
     for code, name in stock_targets.items():
@@ -93,11 +112,11 @@ def get_signals(limit: int = 300, min_price: float = 1500.0, max_price: float = 
             c0 = df_5m.iloc[-1]
             close_p = safe_float(c0['Close'])
 
-            # 投資資金フィルター（100株あたり15万〜80万円 ＝ 株価 1,500円〜8,000円）
+            # 株価フィルター（100株＝15万円〜80万円 ＝ 株価 1,500円〜8,000円）
             if not (min_price <= close_p <= max_price):
                 continue
 
-            # VWAPの計算
+            # VWAP計算
             df_5m['TP'] = (df_5m['High'] + df_5m['Low'] + df_5m['Close']) / 3
             df_5m['PV'] = df_5m['TP'] * df_5m['Volume']
             df_5m['Date'] = df_5m.index.date
@@ -116,7 +135,7 @@ def get_signals(limit: int = 300, min_price: float = 1500.0, max_price: float = 
             patterns = []
             score = 0
 
-            # チャートパターン判定
+            # テクニカル分析パターン判定
             body_size = abs(close_p - open_p)
             upper_wick = high_p - max(open_p, close_p)
             
@@ -145,8 +164,7 @@ def get_signals(limit: int = 300, min_price: float = 1500.0, max_price: float = 
 
             if score > 0 or is_below_vwap:
                 judgment = "🚨 天井・下落確定" if score >= 4 else ("⚠️ パターン発生" if score >= 2 else "🔹 VWAP割り込み")
-                
-                investment_required = round(close_p * 100)  # 100株購入に必要な資金
+                investment_required = round(close_p * 100)
 
                 results.append({
                     "code": code,
