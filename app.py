@@ -28,9 +28,8 @@ def safe_float(val, default=0.0):
     except Exception:
         return default
 
-# 主要銘柄＋JPXリストの安全取得
-def get_jpx_stock_list_auto(limit: int = 100):
-    # 通信エラー時にも確実に動く国内主力100銘柄
+# JPXから全銘柄リストを取得（制限数を維持）
+def get_jpx_stock_list_auto(limit: int = 150):
     POPULAR_STOCKS = {
         "6857": "アドバンテスト", "8035": "東京エレクトロン", "6146": "ディスコ", 
         "9984": "ソフトバンクG", "7011": "三菱重工", "6526": "ソシオネクスト", 
@@ -58,17 +57,13 @@ def get_jpx_stock_list_auto(limit: int = 100):
                         break
         if len(stock_dict) > 10:
             return stock_dict
-    except Exception as e:
-        print(f"⚠️ JPX取得をスキップし、主力銘柄を使用します: {e}")
+    except Exception:
+        pass
 
     return POPULAR_STOCKS
 
 @app.get("/api/signals")
-def get_signals(limit: int = 100, min_price: float = 100.0, max_price: float = 20000.0):
-    """
-    株価データを取得しシグナルを判定。
-    フィルター範囲をデフォルトで広く(100円〜20,000円)設定し、必ず結果が出るように変更。
-    """
+def get_signals(limit: int = 150, min_price: float = 1500.0, max_price: float = 10000.0):
     stock_targets = get_jpx_stock_list_auto(limit=limit)
     ticker_symbols = [f"{code}.T" for code in stock_targets.keys()]
     
@@ -77,24 +72,22 @@ def get_signals(limit: int = 100, min_price: float = 100.0, max_price: float = 2
         return JSONResponse(content=[])
 
     try:
-        print(f"📊 {len(ticker_symbols)} 銘柄のデータ取得中...")
-        # yfinanceでダウンロード
+        # 高速化：期間を2d（直近2日）にしつつ全銘柄をマルチスレッドで一括並列取得
         batch_data = yf.download(
             tickers=ticker_symbols,
-            period="5d",
+            period="2d",
             interval="5m",
             group_by="ticker",
             threads=True,
             progress=False
         )
     except Exception as e:
-        print(f"❌ 株価データダウンロードエラー: {e}")
+        print(f"❌ データ取得エラー: {e}")
         return JSONResponse(content=[])
 
     for code, name in stock_targets.items():
         symbol = f"{code}.T"
         try:
-            # データの切り出し
             if len(ticker_symbols) > 1:
                 if symbol not in batch_data.columns.levels[0]:
                     continue
@@ -102,13 +95,17 @@ def get_signals(limit: int = 100, min_price: float = 100.0, max_price: float = 2
             else:
                 df_5m = batch_data.dropna(how="all")
 
-            if df_5m.empty or len(df_5m) < 5:
+            if df_5m.empty or len(df_5m) < 15:
                 continue
 
             c0 = df_5m.iloc[-1]
+            c1 = df_5m.iloc[-2]
+            c2 = df_5m.iloc[-3]
+
             close_p = safe_float(c0['Close'])
 
-            if close_p <= 0:
+            # 株価フィルター（1,500円〜10,000円）
+            if not (min_price <= close_p <= max_price):
                 continue
 
             # VWAP計算
@@ -119,28 +116,59 @@ def get_signals(limit: int = 100, min_price: float = 100.0, max_price: float = 2
             cum_vol = df_5m.groupby('Date')['Volume'].cumsum()
             df_5m['VWAP'] = cum_pv / (cum_vol + 1e-5)
 
+            open_p   = safe_float(c0['Open'])
+            high_p   = safe_float(c0['High'])
+            low_p    = safe_float(c0['Low'])
             vwap_val = safe_float(df_5m['VWAP'].iloc[-1])
-            open_p  = safe_float(c0['Open'])
-            high_p  = safe_float(c0['High'])
-            low_p   = safe_float(c0['Low'])
+            prev_vwap = safe_float(df_5m['VWAP'].iloc[-2])
 
             patterns = []
             score = 0
 
-            # 簡単なテクニカル分析スコア
+            # --- 空売りシグナル判定 ---
             body_size = abs(close_p - open_p)
             upper_wick = high_p - max(open_p, close_p)
-            
-            if upper_wick >= body_size * 1.5 and upper_wick > 0:
-                patterns.append("長い上ヒゲ")
+            if upper_wick >= max(body_size * 2, 5.0):
+                patterns.append("長い上ヒゲ（天井打）")
                 score += 3
 
-            if close_p < vwap_val:
+            if (c1['Close'] > c1['Open']) and (close_p < open_p) and (open_p >= c1['Close']) and (close_p <= c1['Open']):
+                patterns.append("陰線包み足（強反落）")
+                score += 3
+
+            recent_15 = df_5m.tail(15)
+            highs = recent_15['High'].nlargest(2).values
+            if len(highs) == 2 and abs(highs[0] - highs[1]) / (highs[0] + 1e-5) < 0.003:
+                recent_low_mean = recent_15['Low'].mean()
+                if close_p < recent_low_mean:
+                    patterns.append("ダブルトップ崩れ")
+                    score += 4
+
+            if (c1['Close'] >= prev_vwap) and (close_p < vwap_val):
+                patterns.append("VWAP下抜け（デッドクロス）")
+                score += 3
+            elif close_p < vwap_val:
                 patterns.append("VWAP下回り")
                 score += 1
 
-            judgment = "🚨 天井・下落警戒" if score >= 3 else ("⚠️ パターン発生" if score >= 1 else "🔹 通常")
+            if (c2['Close'] < c2['Open']) and (c1['Close'] < c1['Open']) and (close_p < open_p):
+                patterns.append("3本連続陰線")
+                score += 2
+
+            # 通常状態（スコア0）は除外
+            if score == 0:
+                continue
+
+            if score >= 4:
+                judgment = "🚨 絶好の空売り好機"
+            elif score >= 2:
+                judgment = "⚠️ 空売り検討（監視）"
+            else:
+                judgment = "🔹 VWAP下回り"
+
             investment_required = round(close_p * 100)
+            stop_loss = round(close_p * 1.012, 1)
+            take_profit = round(close_p * 0.975, 1)
 
             results.append({
                 "code": code,
@@ -149,18 +177,16 @@ def get_signals(limit: int = 100, min_price: float = 100.0, max_price: float = 2
                 "investment_required": investment_required,
                 "vwap": round(vwap_val, 1),
                 "score": score,
-                "patterns": " / ".join(patterns) if patterns else "シグナルなし",
+                "patterns": " / ".join(patterns) if patterns else "VWAP下回り",
                 "judgment": judgment,
-                "stop_loss": round(close_p * 1.012, 1),
-                "take_profit": round(close_p * 0.975, 1)
+                "stop_loss": stop_loss,
+                "take_profit": take_profit
             })
 
-        except Exception as e:
+        except Exception:
             continue
 
-    # スコアが高い順、データがあるものをソートして返す
     results = sorted(results, key=lambda x: x['score'], reverse=True)
-    print(f"✅ {len(results)} 件の銘柄を出力します。")
     return JSONResponse(content=results)
 
 @app.get("/api/chart/{code}")
@@ -168,7 +194,7 @@ def get_chart_data(code: str):
     try:
         formatted_ticker = f"{code}.T"
         stock = yf.Ticker(formatted_ticker)
-        df_5m = stock.history(period="5d", interval="5m")
+        df_5m = stock.history(period="2d", interval="5m")
         if df_5m.empty:
             return JSONResponse(content={"candles": [], "vwap": [], "earnings_date": "未定", "ex_dividend_date": "なし/未定"})
 
