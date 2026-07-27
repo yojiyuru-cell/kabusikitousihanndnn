@@ -68,9 +68,8 @@ def get_signals():
     
     for code, name in stock_targets.items():
         try:
-            # 5分足データの取得
             df_5m = fetch_jpx_data(code, interval="5m", period="5d")
-            if df_5m.empty or len(df_5m) < 10:
+            if df_5m.empty or len(df_5m) < 15:
                 continue
 
             # VWAPの計算
@@ -81,62 +80,84 @@ def get_signals():
             cum_vol = df_5m.groupby('Date')['Volume'].cumsum()
             df_5m['VWAP'] = cum_pv / cum_vol
             
-            # 直近2本のローソク足を取得
-            prev_candle = df_5m.iloc[-2]
-            curr_candle = df_5m.iloc[-1]
+            # 本日のデータのみ抽出
+            latest_date = df_5m['Date'].iloc[-1]
+            df_today = df_5m[df_5m['Date'] == latest_date]
+            if len(df_today) < 3:
+                continue
 
-            open_p  = curr_candle['Open']
+            # 1. 本日の騰落率（前日終値または始値比での急騰判定）
+            open_today = df_today['Open'].iloc[0]
+            curr_candle = df_today.iloc[-1]
+            prev_candle = df_today.iloc[-2]
+
             close_p = curr_candle['Close']
-            high_p  = curr_candle['High']
-            low_p   = curr_candle['Low']
+            open_p = curr_candle['Open']
+            high_p = curr_candle['High']
+            low_p = curr_candle['Low']
+            vol_p = curr_candle['Volume']
             vwap_val = safe_float(curr_candle['VWAP'])
 
-            p_open_p  = prev_candle['Open']
-            p_close_p = prev_candle['Close']
+            prev_close_p = prev_candle['Close']
+            prev_vwap_val = safe_float(prev_candle['VWAP'])
+            avg_vol = df_today['Volume'].tail(10).mean()
 
-            # --- チャートの形 判定ロジック ---
-            body_size = abs(close_p - open_p)              # 実体の長さ
-            upper_wick = high_p - max(open_p, close_p)    # 上ヒゲの長さ
+            # 条件A: 本日の高値圏・急騰（始値比+2.5%以上、または高値からの押し）
+            day_gain = ((high_p - open_today) / open_today) * 100
+            is_surging = day_gain >= 2.5
 
-            # パターン1: 長い上ヒゲ（実体の2倍以上の上ヒゲ）
-            is_upper_wick = (upper_wick >= body_size * 2) and (upper_wick > 0)
+            # 条件B: VWAPクロス（前回はVWAP上 ➔ 今回はVWAP下割れ）
+            is_vwap_break = (prev_close_p >= prev_vwap_val) and (close_p < vwap_val)
 
-            # パターン2: 陰線包み足（前回の陽線を今回の大きな陰線が包み込む）
-            is_prev_bull = p_close_p > p_open_p
-            is_curr_bear = close_p < open_p
-            is_engulfing = is_prev_bull and is_curr_bear and (open_p >= p_close_p) and (close_p <= p_open_p)
+            # 条件C: 戻り売りパターン（すでにVWAP下で、高値でVWAPにタッチして反発失敗）
+            is_vwap_retest = (close_p < vwap_val) and (high_p >= vwap_val * 0.998) and (close_p < open_p)
 
-            # 条件: VWAPより下に位置しているか
-            is_below_vwap = close_p < vwap_val
+            # 条件D: 出来高伴う（急騰・急落時の出来高増加）
+            is_volume_spike = vol_p > (avg_vol * 1.3)
 
-            # --- 総合判定 ---
-            if is_below_vwap and is_upper_wick:
-                judgment = "🚨 天井サイン（長い上ヒゲ＋VWAP割れ）"
-            elif is_below_vwap and is_engulfing:
-                judgment = "🚨 転換サイン（包み足＋VWAP割れ）"
-            elif is_below_vwap:
-                judgment = "🔹 VWAP下回り"
-            elif is_upper_wick:
-                judgment = "🟡 天井気配（上ヒゲあり・VWAP上）"
-            else:
-                judgment = "⚪️ 通常"
+            # 条件E: チャート形状（上ヒゲピンバー）
+            body_size = abs(close_p - open_p)
+            upper_wick = high_p - max(open_p, close_p)
+            is_upper_wick = (upper_wick >= body_size * 1.8) and (upper_wick > 0)
 
-            results.append({
-                "code": code,
-                "name": name,
-                "price": round(safe_float(close_p), 1),
-                "vwap": round(vwap_val, 1),
-                "daily_dev": 0,  # 非表示用互換
-                "daily_rsi": 0,  # 非表示用互換
-                "signal_timing": "VWAP下回り" if is_below_vwap else "VWAP上回り",
-                "daily_judgment": judgment,
-                "stop_loss": round(safe_float(close_p) * 1.015),
-                "take_profit": round(safe_float(close_p) * 0.98)
-            })
+            # --- 勝ち筋シグナル判定 ---
+            judgment = "⚪️ 監視対象外"
+            priority = 0
+
+            if is_surging and is_vwap_break and is_volume_spike:
+                judgment = "🔥 超強力：急騰後VWAPブレイク（成り行き売り）"
+                priority = 3
+            elif is_surging and is_vwap_retest and is_upper_wick:
+                judgment = "🚨 高勝率：VWAP戻り売り失敗（上ヒゲピンバー）"
+                priority = 3
+            elif is_surging and (close_p < vwap_val):
+                judgment = "⚡️ 空売りチャンス（急騰後のVWAP割り込み）"
+                priority = 2
+            elif is_surging and (close_p >= vwap_val):
+                judgment = "🟡 急騰高値圏（VWAP割れ待ち）"
+                priority = 1
+
+            if priority > 0:
+                # 損切り：エントリー価格 +1.2%（またはVWAP上抜け）
+                # 利確：エントリー価格 -2.5%
+                results.append({
+                    "code": code,
+                    "name": name,
+                    "price": round(safe_float(close_p), 1),
+                    "vwap": round(vwap_val, 1),
+                    "gain": round(day_gain, 1),
+                    "judgment": judgment,
+                    "priority": priority,
+                    "stop_loss": round(safe_float(close_p) * 1.012, 1),
+                    "take_profit": round(safe_float(close_p) * 0.975, 1)
+                })
+
         except Exception as e:
             print(f"銘柄スキップ {code}: {e}")
             continue
 
+    # シグナルの優先度（高い順）にソートして返却
+    results = sorted(results, key=lambda x: x['priority'], reverse=True)
     return JSONResponse(content=results)
 
 @app.get("/api/chart/{code}")
