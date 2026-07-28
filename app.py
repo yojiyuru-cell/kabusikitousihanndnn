@@ -96,30 +96,25 @@ def process_df(df, code, name):
     if df is None or df.empty or len(df) < 3:
         return None
 
-    # 列名の整理（MultiIndex対策）
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(-1)
 
-    # 必須カラムチェック
     required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
     if not all(col in df.columns for col in required_cols):
         return None
 
-    # 重複除去とソート
+    # 重複削除＆ソート
     df = df.loc[~df.index.duplicated(keep='first')].sort_index()
 
-    # 直近3本のデータ
     c0 = df.iloc[-1]
     c1 = df.iloc[-2]
     c2 = df.iloc[-3]
 
     close_p = safe_float(c0['Close'])
     
-    # 1株あたり1万円を超える銘柄、および0円以下を除外
     if close_p <= 0 or close_p > 10000:
         return None
 
-    # VWAP計算
     tp = (df['High'] + df['Low'] + df['Close']) / 3
     pv = tp * df['Volume']
     cum_pv = pv.cumsum()
@@ -135,7 +130,6 @@ def process_df(df, code, name):
     patterns = []
     score = 0
 
-    # シグナル判定
     body_size = abs(close_p - open_p)
     upper_wick = high_p - max(open_p, close_p)
     if upper_wick >= max(body_size * 1.5, 3.0):
@@ -191,7 +185,6 @@ def run_scan():
     targets = JPX400_STOCKS
     results = []
 
-    # 15銘柄ずつ分散取得
     codes = list(targets.keys())
     chunk_size = 15
     
@@ -248,8 +241,14 @@ def get_chart_data(code: str):
         if df.empty:
             return JSONResponse(content={"candles": [], "vwap": []})
 
-        # 重複削除＆時間順ソート（チャート描画エラーを防止）
+        # 重複削除＆時間順ソート
         df = df.loc[~df.index.duplicated(keep='first')].sort_index()
+
+        # 日本時間（Asia/Tokyo）へ変換
+        if df.index.tz is None:
+            df.index = df.index.tz_localize('UTC').tz_convert('Asia/Tokyo')
+        else:
+            df.index = df.index.tz_convert('Asia/Tokyo')
 
         tp = (df['High'] + df['Low'] + df['Close']) / 3
         pv = tp * df['Volume']
