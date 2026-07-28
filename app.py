@@ -64,7 +64,9 @@ def process_df(df, code, name):
     c2 = df.iloc[-3]
 
     close_p = safe_float(c0['Close'])
-    if close_p <= 0:
+    
+    # 【変更箇所】1株あたり1万円を超える銘柄、および0円以下を除外
+    if close_p <= 0 or close_p > 10000:
         return None
 
     # VWAP計算
