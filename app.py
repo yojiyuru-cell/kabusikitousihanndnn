@@ -2,6 +2,8 @@ import os
 import math
 import io
 import re
+import time
+import threading
 import requests
 import pandas as pd
 import yfinance as yf
@@ -17,6 +19,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ---------------------------------------------------------
+# メモリ内キャッシュ (最新のTOP100結果を保持)
+# ---------------------------------------------------------
+CACHED_RESULTS = []
+IS_SCANNING = False
+LAST_UPDATED_TIME = ""
 
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
@@ -46,8 +55,7 @@ def get_all_jpx_stock_list():
     POPULAR_STOCKS = {
         "6857": "アドバンテスト", "8035": "東京エレクトロン", "6146": "ディスコ", 
         "9984": "ソフトバンクG", "7011": "三菱重工", "6526": "ソシオネクスト", 
-        "6758": "ソニーG", "7203": "トヨタ", "8306": "三菱UFJ", "9104": "商船三井",
-        "8002": "丸紅", "6367": "ダイキン", "6920": "レーザーテック", "7735": "スクリン"
+        "6758": "ソニーG", "7203": "トヨタ", "8306": "三菱UFJ", "9104": "商船三井"
     }
 
     try:
@@ -63,7 +71,6 @@ def get_all_jpx_stock_list():
                 name_raw = str(row['銘柄名']).strip()
 
                 if len(code_raw) == 4 and code_raw.isdigit():
-                    # ETF / 上場投資信託を除外し、個別株のみ抽出
                     if not is_etf_or_fund(code_raw, name_raw):
                         stock_dict[code_raw] = name_raw
 
@@ -74,18 +81,23 @@ def get_all_jpx_stock_list():
 
     return POPULAR_STOCKS
 
-@app.get("/api/signals")
-def get_signals(limit: int = 100, min_price: float = 1500.0, max_price: float = 10000.0):
-    # 全銘柄を取得
+# ---------------------------------------------------------
+# バックグラウンド全銘柄スキャン関数
+# ---------------------------------------------------------
+def scan_all_stocks_background():
+    global CACHED_RESULTS, IS_SCANNING, LAST_UPDATED_TIME
+    if IS_SCANNING:
+        return
+    
+    IS_SCANNING = True
+    print("🔄 バックグラウンドで全銘柄スキャンを開始します...")
+    
     stock_targets = get_all_jpx_stock_list()
     codes = list(stock_targets.keys())
-    
     results = []
-    if not codes:
-        return JSONResponse(content=[])
 
-    # 4000銘柄近くを一気に処理するため、500銘柄ずつのバッチに分割して一括ダウンロード
-    batch_size = 500
+    # 300銘柄ごとのバッチ処理
+    batch_size = 300
     for i in range(0, len(codes), batch_size):
         batch_codes = codes[i:i + batch_size]
         ticker_symbols = [f"{code}.T" for code in batch_codes]
@@ -100,7 +112,6 @@ def get_signals(limit: int = 100, min_price: float = 1500.0, max_price: float = 
                 progress=False
             )
         except Exception as e:
-            print(f"❌ バッチデータ取得エラー ({i}): {e}")
             continue
 
         for code in batch_codes:
@@ -124,7 +135,7 @@ def get_signals(limit: int = 100, min_price: float = 1500.0, max_price: float = 
                 close_p = safe_float(c0['Close'])
 
                 # 株価フィルター（1,500円〜10,000円）
-                if not (min_price <= close_p <= max_price):
+                if not (1500.0 <= close_p <= 10000.0):
                     continue
 
                 # VWAP計算
@@ -175,7 +186,6 @@ def get_signals(limit: int = 100, min_price: float = 1500.0, max_price: float = 
                     patterns.append("3本連続陰線")
                     score += 2
 
-                # 通常状態（スコア0）は除外
                 if score == 0:
                     continue
 
@@ -186,33 +196,52 @@ def get_signals(limit: int = 100, min_price: float = 1500.0, max_price: float = 
                 else:
                     judgment = "🔹 VWAP下回り"
 
-                investment_required = round(close_p * 100)
-                stop_loss = round(close_p * 1.012, 1)
-                take_profit = round(close_p * 0.975, 1)
-
                 results.append({
                     "code": code,
                     "name": name,
                     "price": round(close_p, 1),
-                    "investment_required": investment_required,
+                    "investment_required": round(close_p * 100),
                     "vwap": round(vwap_val, 1),
                     "score": score,
                     "patterns": " / ".join(patterns) if patterns else "VWAP下回り",
                     "judgment": judgment,
-                    "stop_loss": stop_loss,
-                    "take_profit": take_profit
+                    "stop_loss": round(close_p * 1.012, 1),
+                    "take_profit": round(close_p * 0.975, 1)
                 })
 
             except Exception:
                 continue
 
-    # スコア（好機度）の高い順に並び替え
+    # スコア順にソートして上位100銘柄をキャッシュ保存
     results = sorted(results, key=lambda x: x['score'], reverse=True)
+    CACHED_RESULTS = results[:100]
+    IS_SCANNING = False
+    print(f"✅ スキャン完了！ TOP{len(CACHED_RESULTS)} 銘柄をキャッシュしました。")
 
-    # 全銘柄の中からスコア上位100銘柄のみに絞り込んで返す
-    top_100_results = results[:100]
+# ---------------------------------------------------------
+# 定期更新タイマー（バックグラウンドループ）
+# ---------------------------------------------------------
+def background_loop():
+    while True:
+        try:
+            scan_all_stocks_background()
+        except Exception as e:
+            print(f"❌ ループエラー: {e}")
+        time.sleep(300) # 5分ごとに自動再スキャン
 
-    return JSONResponse(content=top_100_results)
+# サーバー起動時にスキャンを開始
+threading.Thread(target=background_loop, daemon=True).start()
+
+# ---------------------------------------------------------
+# APIエンドポイント
+# ---------------------------------------------------------
+@app.get("/api/signals")
+def get_signals():
+    # 初回スキャン中かつキャッシュが無い場合、手動スキャンを実行
+    if not CACHED_RESULTS and not IS_SCANNING:
+        threading.Thread(target=scan_all_stocks_background, daemon=True).start()
+        
+    return JSONResponse(content=CACHED_RESULTS)
 
 @app.get("/api/chart/{code}")
 def get_chart_data(code: str):
@@ -261,3 +290,4 @@ def get_index():
         with open("index.html", "r", encoding="utf-8") as f:
             return HTMLResponse(content=f.read())
     return HTMLResponse(content="<h1>index.html が見つかりません</h1>", status_code=404)
+
