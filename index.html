@@ -3,97 +3,78 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>日本株 デイトレ空売りシグナル（上位100銘柄）</title>
+    <title>日本株 空売りシグナルチェッカー</title>
+    <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
-    <script src="https://unpkg.com/lucide@latest"></script>
+    <!-- Lightweight Charts -->
+    <script src="https://unpkg.com/lightweight-charts@3.8.0/dist/lightweight-charts.standalone.production.js"></script>
     <style>
         body { background-color: #0f172a; color: #f8fafc; }
         .bg-card { background-color: #1e293b; }
         .border-card { border-color: #334155; }
     </style>
 </head>
-<body class="p-4 md:p-8 min-h-screen">
+<body class="min-h-screen p-4 md:p-8">
 
     <div class="max-w-7xl mx-auto space-y-6">
-        
-        <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 bg-card p-6 rounded-xl border border-card shadow-lg">
+        <!-- ヘッダー -->
+        <header class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 bg-card p-6 rounded-xl border border-card shadow-lg">
             <div>
-                <h1 class="text-2xl md:text-3xl font-bold flex items-center gap-2 text-red-400">
-                    <i data-lucide="trending-down"></i> 日本株 空売りシグナル・スクリーナー
+                <h1 class="text-2xl font-bold text-slate-100 flex items-center gap-2">
+                    <span>📉 日本株 空売りシグナルチェッカー</span>
                 </h1>
-                <p class="text-slate-400 text-sm mt-1">全東証個別株 スキャン結果（好機上位100銘柄）</p>
+                <p class="text-sm text-slate-400 mt-1">VWAP・天井パターン分析による空売り候補銘柄の自動抽出</p>
             </div>
-            <div class="flex items-center gap-3">
-                <button id="refresh-btn" onclick="fetchSignals()" class="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-lg font-medium transition shadow">
-                    <i data-lucide="refresh-cw" id="refresh-icon"></i> 更新
-                </button>
-            </div>
-        </div>
+            <button id="refreshBtn" onclick="loadData()" class="px-5 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg transition font-semibold flex items-center gap-2 shadow">
+                <span id="spinner" class="hidden animate-spin">🔄</span>
+                <span>手動更新</span>
+            </button>
+        </header>
 
-        <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+        <!-- メインコンテンツ -->
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
             
-            <div class="lg:col-span-5 bg-card rounded-xl border border-card p-4 flex flex-col h-[750px]">
-                <div class="flex justify-between items-center pb-3 border-b border-card">
-                    <h2 class="font-semibold text-lg flex items-center gap-2">
-                        <i data-lucide="list"></i> 銘柄一覧 (<span id="stock-count">0</span> / 100)
-                    </h2>
-                    <span id="scan-status" class="text-xs text-amber-400">データ取得中...</span>
-                </div>
-                
-                <div id="loading" class="flex-1 flex justify-center items-center flex-col gap-3">
-                    <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-500"></div>
-                    <p id="loading-text" class="text-slate-400 text-sm">全銘柄をスキャンしています。そのまま数秒お待ちください...</p>
+            <!-- 銘柄リスト（左側） -->
+            <div class="lg:col-span-1 bg-card rounded-xl border border-card p-4 h-[700px] flex flex-col">
+                <div class="flex justify-between items-center mb-4 pb-2 border-b border-card">
+                    <h2 class="font-bold text-slate-200">検出銘柄一覧</h2>
+                    <span id="countBadge" class="text-xs bg-slate-700 text-slate-300 px-2 py-1 rounded-full">0件</span>
                 </div>
 
-                <div id="stock-list" class="flex-1 overflow-y-auto space-y-2 mt-3 pr-1 hidden">
+                <div id="stockList" class="overflow-y-auto space-y-2 flex-1 pr-1">
+                    <div class="text-center text-slate-400 py-12 flex flex-col items-center gap-3">
+                        <div class="animate-spin text-3xl">🔄</div>
+                        <p>データ分析中...<br><span class="text-xs text-slate-500">（約10〜20秒で自動反映されます）</span></p>
+                    </div>
                 </div>
             </div>
 
-            <div class="lg:col-span-7 space-y-6">
-                <div class="bg-card rounded-xl border border-card p-4 flex flex-col">
-                    <div class="flex justify-between items-center mb-3">
-                        <div>
-                            <span id="selected-code" class="text-xs text-indigo-400 font-bold uppercase">----</span>
-                            <h2 id="selected-name" class="text-xl font-bold">銘柄を選択してください</h2>
-                        </div>
-                        <div class="text-right">
-                            <span id="selected-price" class="text-2xl font-bold text-red-400">¥--</span>
-                            <div id="selected-judgment" class="text-xs text-slate-400">--</div>
-                        </div>
+            <!-- チャート＆詳細画面（右側） -->
+            <div class="lg:col-span-2 bg-card rounded-xl border border-card p-6 flex flex-col justify-between h-[700px]">
+                <div id="chartContainer" class="w-full flex-1 relative min-h-[400px]">
+                    <div id="chartPlaceholder" class="absolute inset-0 flex items-center justify-center text-slate-500">
+                        左側の銘柄を選択すると5分足チャートが表示されます
                     </div>
-                    
-                    <div id="chart-container" class="w-full h-[400px] bg-slate-950 rounded-lg border border-card relative">
-                        <div id="chart-placeholder" class="absolute inset-0 flex items-center justify-center text-slate-500 text-sm">
-                            銘柄を選択すると5分足チャートが表示されます
-                        </div>
-                    </div>
+                    <div id="tvChart" class="w-full h-full"></div>
                 </div>
 
-                <div class="bg-card rounded-xl border border-card p-4">
-                    <h3 class="font-semibold text-base mb-3 flex items-center gap-2 text-slate-200">
-                        <i data-lucide="shield-alert"></i> トレード目安（100株）
-                    </h3>
-                    <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
-                        <div class="bg-slate-900/50 p-3 rounded-lg border border-card">
-                            <div class="text-xs text-slate-400">必要金額</div>
-                            <div id="target-investment" class="text-base font-bold text-slate-200 mt-1">¥--</div>
-                        </div>
-                        <div class="bg-slate-900/50 p-3 rounded-lg border border-card">
-                            <div class="text-xs text-slate-400">VWAP</div>
-                            <div id="target-vwap" class="text-base font-bold text-indigo-400 mt-1">¥--</div>
-                        </div>
-                        <div class="bg-slate-900/50 p-3 rounded-lg border border-card">
-                            <div class="text-xs text-slate-400">損切り (1.2%上)</div>
-                            <div id="target-stoploss" class="text-base font-bold text-orange-400 mt-1">¥--</div>
-                        </div>
-                        <div class="bg-slate-900/50 p-3 rounded-lg border border-card">
-                            <div class="text-xs text-slate-400">利確 (2.5%下)</div>
-                            <div id="target-takeprofit" class="text-base font-bold text-emerald-400 mt-1">¥--</div>
-                        </div>
+                <!-- 選択銘柄の詳細情報 -->
+                <div id="stockDetail" class="mt-4 pt-4 border-t border-card grid grid-cols-2 sm:grid-cols-4 gap-4 hidden">
+                    <div class="bg-slate-800/50 p-3 rounded-lg border border-slate-700/50">
+                        <div class="text-xs text-slate-400">現在値</div>
+                        <div id="detailPrice" class="text-lg font-bold text-slate-100">-円</div>
                     </div>
-                    <div class="mt-4 p-3 bg-slate-900/80 rounded-lg text-xs text-slate-400 leading-relaxed">
-                        <span class="font-bold text-amber-400">検出シグナル:</span> <span id="target-patterns">--</span>
+                    <div class="bg-slate-800/50 p-3 rounded-lg border border-slate-700/50">
+                        <div class="text-xs text-slate-400">VWAP</div>
+                        <div id="detailVwap" class="text-lg font-bold text-amber-400">-円</div>
+                    </div>
+                    <div class="bg-slate-800/50 p-3 rounded-lg border border-slate-700/50">
+                        <div class="text-xs text-slate-400">損切り目安 (+1.2%)</div>
+                        <div id="detailStop" class="text-lg font-bold text-rose-400">-円</div>
+                    </div>
+                    <div class="bg-slate-800/50 p-3 rounded-lg border border-slate-700/50">
+                        <div class="text-xs text-slate-400">利確目安 (-2.5%)</div>
+                        <div id="detailTarget" class="text-lg font-bold text-emerald-400">-円</div>
                     </div>
                 </div>
             </div>
@@ -105,122 +86,135 @@
         let chart = null;
         let candleSeries = null;
         let vwapSeries = null;
-        let pollTimer = null;
+        let retryTimer = null;
 
-        lucide.createIcons();
-
-        window.addEventListener('DOMContentLoaded', () => {
-            initChart();
-            fetchSignals();
-        });
-
-        function initChart() {
-            const container = document.getElementById('chart-container');
-            chart = LightweightCharts.createChart(container, {
-                layout: { backgroundColor: '#020617', textColor: '#94a3b8' },
-                grid: { vertLines: { color: '#1e293b' }, horzLines: { color: '#1e293b' } },
-                timeScale: { timeVisible: true, secondsVisible: false },
-            });
-
-            candleSeries = chart.addCandlestickSeries({
-                upColor: '#22c55e', downColor: '#ef4444',
-                borderVisible: false, wickUpColor: '#22c55e', wickDownColor: '#ef4444',
-            });
-
-            vwapSeries = chart.addLineSeries({ color: '#6366f1', lineWidth: 2 });
-
-            window.addEventListener('resize', () => {
-                chart.resize(container.clientWidth, container.clientHeight);
-            });
-        }
-
-        async function fetchSignals() {
-            const loading = document.getElementById('loading');
-            const stockList = document.getElementById('stock-list');
-            const refreshIcon = document.getElementById('refresh-icon');
-            const scanStatus = document.getElementById('scan-status');
-
-            refreshIcon.classList.add('animate-spin');
+        async function loadData() {
+            const spinner = document.getElementById('spinner');
+            const listEl = document.getElementById('stockList');
+            spinner.classList.remove('hidden');
 
             try {
                 const res = await fetch('/api/signals');
                 const data = await res.json();
-                
-                if (data && data.length > 0) {
-                    if (pollTimer) clearInterval(pollTimer);
-                    loading.classList.add('hidden');
-                    stockList.classList.remove('hidden');
-                    scanStatus.innerText = "最新完了";
-                    scanStatus.className = "text-xs text-emerald-400";
-                    
-                    document.getElementById('stock-count').innerText = data.length;
+
+                if (Array.isArray(data) && data.length > 0) {
                     renderStockList(data);
-                    selectStock(data[0]);
+                    if (retryTimer) clearInterval(retryTimer);
                 } else {
-                    // データ準備中の場合は自動リトライ（5秒間隔）
-                    scanStatus.innerText = "スキャン計算中...";
-                    if (!pollTimer) {
-                        pollTimer = setInterval(fetchSignals, 5000);
+                    // まだスキャン中なら2秒後に再試行
+                    listEl.innerHTML = `
+                        <div class="text-center text-slate-400 py-12 flex flex-col items-center gap-3">
+                            <div class="animate-spin text-3xl">🔄</div>
+                            <p class="text-sm">初回スキャン実行中...<br><span class="text-xs text-slate-500">数秒後に自動で表示されます</span></p>
+                        </div>
+                    `;
+                    if (!retryTimer) {
+                        retryTimer = setInterval(loadData, 2000);
                     }
                 }
             } catch (err) {
-                console.error("取得エラー", err);
+                console.error("データ取得エラー:", err);
             } finally {
-                refreshIcon.classList.remove('animate-spin');
+                spinner.classList.add('hidden');
             }
         }
 
         function renderStockList(stocks) {
-            const listContainer = document.getElementById('stock-list');
-            listContainer.innerHTML = '';
+            const listEl = document.getElementById('stockList');
+            document.getElementById('countBadge').innerText = `${stocks.length}件`;
+            listEl.innerHTML = '';
 
-            stocks.forEach((s) => {
+            stocks.forEach((item, index) => {
                 const card = document.createElement('div');
-                card.className = `p-3 rounded-lg border border-card hover:border-indigo-500/50 bg-slate-900/40 hover:bg-slate-800/60 cursor-pointer transition flex justify-between items-center`;
-                card.onclick = () => selectStock(s);
-
+                card.className = `p-3 rounded-lg border cursor-pointer transition hover:bg-slate-800/80 ${index === 0 ? 'bg-slate-800 border-blue-500' : 'bg-slate-900/50 border-slate-800'}`;
+                
                 card.innerHTML = `
-                    <div>
-                        <div class="flex items-center gap-2">
-                            <span class="text-xs font-bold text-indigo-400">${s.code}</span>
-                            <span class="font-semibold text-sm text-slate-100">${s.name}</span>
+                    <div class="flex justify-between items-start mb-1">
+                        <div>
+                            <span class="font-bold text-slate-200">${item.name}</span>
+                            <span class="text-xs text-slate-400 ml-1">(${item.code})</span>
                         </div>
-                        <div class="text-xs text-slate-400 mt-1">${s.patterns}</div>
+                        <span class="text-xs px-2 py-0.5 rounded font-semibold ${item.score >= 4 ? 'bg-red-500/20 text-red-400 border border-red-500/30' : 'bg-amber-500/20 text-amber-400'}">
+                            ${item.judgment}
+                        </span>
                     </div>
-                    <div class="text-right">
-                        <div class="text-sm font-bold text-red-400">¥${s.price.toLocaleString()}</div>
-                        <div class="text-[10px] text-amber-400 font-medium">${s.judgment}</div>
+                    <div class="text-xs text-slate-400 flex justify-between mt-2">
+                        <span>現在値: <b class="text-slate-200">${item.price.toLocaleString()}円</b></span>
+                        <span>必要資金: <b>${(item.investment_required / 10000).toFixed(1)}万円</b></span>
+                    </div>
+                    <div class="text-[11px] text-slate-500 mt-1 truncate">
+                        パターン: ${item.patterns}
                     </div>
                 `;
-                listContainer.appendChild(card);
+
+                card.onclick = () => {
+                    document.querySelectorAll('#stockList > div').forEach(c => c.classList.remove('border-blue-500', 'bg-slate-800'));
+                    card.classList.add('border-blue-500', 'bg-slate-800');
+                    selectStock(item);
+                };
+
+                listEl.appendChild(card);
             });
+
+            if (stocks.length > 0) {
+                selectStock(stocks[0]);
+            }
         }
 
-        async function selectStock(stock) {
-            document.getElementById('chart-placeholder')?.classList.add('hidden');
-            document.getElementById('selected-code').innerText = stock.code;
-            document.getElementById('selected-name').innerText = stock.name;
-            document.getElementById('selected-price').innerText = `¥${stock.price.toLocaleString()}`;
-            document.getElementById('selected-judgment').innerText = stock.judgment;
+        async function selectStock(item) {
+            document.getElementById('chartPlaceholder').classList.add('hidden');
+            document.getElementById('stockDetail').classList.remove('hidden');
 
-            document.getElementById('target-investment').innerText = `¥${stock.investment_required.toLocaleString()}`;
-            document.getElementById('target-vwap').innerText = `¥${stock.vwap.toLocaleString()}`;
-            document.getElementById('target-stoploss').innerText = `¥${stock.stop_loss.toLocaleString()}`;
-            document.getElementById('target-takeprofit').innerText = `¥${stock.take_profit.toLocaleString()}`;
-            document.getElementById('target-patterns').innerText = stock.patterns;
+            document.getElementById('detailPrice').innerText = `${item.price.toLocaleString()}円`;
+            document.getElementById('detailVwap').innerText = `${item.vwap.toLocaleString()}円`;
+            document.getElementById('detailStop').innerText = `${item.stop_loss.toLocaleString()}円`;
+            document.getElementById('detailTarget').innerText = `${item.take_profit.toLocaleString()}円`;
+
+            initChart();
 
             try {
-                const res = await fetch(`/api/chart/${stock.code}`);
+                const res = await fetch(`/api/chart/${item.code}`);
                 const data = await res.json();
+
                 if (data.candles && data.candles.length > 0) {
                     candleSeries.setData(data.candles);
                     vwapSeries.setData(data.vwap);
                     chart.timeScale().fitContent();
                 }
             } catch (err) {
-                console.error("チャート取得失敗", err);
+                console.error("チャート取得エラー:", err);
             }
         }
+
+        function initChart() {
+            if (chart) return;
+
+            const container = document.getElementById('tvChart');
+            chart = LightweightCharts.createChart(container, {
+                layout: { backgroundColor: 'transparent', textColor: '#94a3b8' },
+                grid: { vertLines: { color: '#334155' }, horzLines: { color: '#334155' } },
+                timeScale: { timeVisible: true, secondsVisible: false }
+            });
+
+            candleSeries = chart.addCandlestickSeries({
+                upColor: '#22c55e', downColor: '#ef4444',
+                borderUpColor: '#22c55e', borderDownColor: '#ef4444',
+                wickUpColor: '#22c55e', wickDownColor: '#ef4444',
+            });
+
+            vwapSeries = chart.addLineSeries({
+                color: '#f59e0b',
+                lineWidth: 2,
+                title: 'VWAP'
+            });
+
+            window.addEventListener('resize', () => {
+                chart.applyOptions({ width: container.clientWidth, height: container.clientHeight });
+            });
+        }
+
+        // 初期表示呼び出し
+        loadData();
     </script>
 </body>
 </html>
