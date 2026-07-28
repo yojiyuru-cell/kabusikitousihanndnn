@@ -44,7 +44,7 @@ JPX400_STOCKS = {
     "6954": "ファナック", "6857": "アドバンテスト", "8035": "東京エレクトロン",
     "6146": "ディスコ", "6526": "ソシオネクスト", "6367": "ダイキン", "6920": "レーザーテック",
     "7735": "スクリン", "7751": "キヤノン", "7731": "ニコン", "6273": "SMC",
-    "6701": "NEC", "6502": "東芝", "6861": "キーエンス", "6971": "京セラ",
+    "6701": "NEC", "6861": "キーエンス", "6971": "京セラ",
     
     # 機械・重工業・プラント
     "7011": "三菱重工", "7012": "川崎重工", "7013": "IHI", "6301": "小松製作所",
@@ -57,7 +57,7 @@ JPX400_STOCKS = {
     "9735": "セコム", "9719": "SCSK", "3626": "TIS",
     
     # ゲーム・エンタメ・メディア
-    "7974": "任天堂", "9684": "スクウェア・エニックス", "3659": "ネクソン", "9438": "エムティーアイ",
+    "7974": "任天堂", "9684": "スクウェア・エニックス", "3659": "ネクソン",
     
     # 医薬品・化学・素材
     "4063": "信越化学", "4502": "武田薬品", "4519": "中外製薬", "4568": "第一三共",
@@ -104,6 +104,9 @@ def process_df(df, code, name):
     required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
     if not all(col in df.columns for col in required_cols):
         return None
+
+    # 重複除去とソート
+    df = df.loc[~df.index.duplicated(keep='first')].sort_index()
 
     # 直近3本のデータ
     c0 = df.iloc[-1]
@@ -245,6 +248,9 @@ def get_chart_data(code: str):
         if df.empty:
             return JSONResponse(content={"candles": [], "vwap": []})
 
+        # 重複削除＆時間順ソート（チャート描画エラーを防止）
+        df = df.loc[~df.index.duplicated(keep='first')].sort_index()
+
         tp = (df['High'] + df['Low'] + df['Close']) / 3
         pv = tp * df['Volume']
         cum_pv = pv.cumsum()
@@ -254,20 +260,29 @@ def get_chart_data(code: str):
         candles, vwap_list = [], []
         for idx, row in df.tail(80).iterrows():
             ts = int(idx.timestamp())
-            candles.append({
-                "time": ts,
-                "open": round(safe_float(row['Open']), 1),
-                "high": round(safe_float(row['High']), 1),
-                "low": round(safe_float(row['Low']), 1),
-                "close": round(safe_float(row['Close']), 1)
-            })
-            vwap_list.append({
-                "time": ts,
-                "value": round(safe_float(row['VWAP']), 1)
-            })
+            
+            open_p = safe_float(row['Open'])
+            high_p = safe_float(row['High'])
+            low_p = safe_float(row['Low'])
+            close_p = safe_float(row['Close'])
+            vwap_p = safe_float(row['VWAP'])
+
+            if open_p > 0 and close_p > 0:
+                candles.append({
+                    "time": ts,
+                    "open": round(open_p, 1),
+                    "high": round(high_p, 1),
+                    "low": round(low_p, 1),
+                    "close": round(close_p, 1)
+                })
+                vwap_list.append({
+                    "time": ts,
+                    "value": round(vwap_p, 1)
+                })
 
         return JSONResponse(content={"candles": candles, "vwap": vwap_list})
-    except Exception:
+    except Exception as e:
+        print(f"Chart error: {e}")
         return JSONResponse(content={"candles": [], "vwap": []})
 
 @app.get("/")
