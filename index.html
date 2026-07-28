@@ -4,8 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>JPX400 デイ instruments 空売りシグナル</title>
-    <!-- 軽量チャートライブラリ (Lightweight Charts) -->
-    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+    <!-- バージョン固定版（v4.1.1）のチャートライブラリ -->
+    <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
     <style>
         :root {
             --bg-color: #121214;
@@ -25,7 +25,7 @@
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
         }
 
-        /* 画面上部に固定されるチャートセクション */
+        /* 📌 画面上部に固定されるチャートセクション */
         #sticky-chart-container {
             position: sticky;
             top: 0;
@@ -200,7 +200,7 @@
             const chartElement = document.getElementById('chart');
             chart = LightweightCharts.createChart(chartElement, {
                 layout: {
-                    backgroundColor: '#1e1e24',
+                    background: { type: 'solid', color: '#1e1e24' },
                     textColor: '#d1d5db',
                 },
                 grid: {
@@ -231,7 +231,9 @@
             });
 
             window.addEventListener('resize', () => {
-                chart.applyOptions({ width: chartElement.clientWidth });
+                if (chart && chartElement) {
+                    chart.applyOptions({ width: chartElement.clientWidth });
+                }
             });
         }
 
@@ -254,7 +256,7 @@
                 }
             } catch (err) {
                 console.error('Chart load error:', err);
-                document.getElementById('chart-info').innerText = 'エラー発生';
+                document.getElementById('chart-info').innerText = 'データ取得エラー';
             }
         }
 
@@ -301,7 +303,7 @@
 
                     tbody.appendChild(tr);
 
-                    // 1番上の高スコア銘柄を初期ロード
+                    // 1番上の高スコア銘柄を初期表示
                     if (index === 0 && !activeRow) {
                         tr.classList.add('selected-row');
                         activeRow = tr;
