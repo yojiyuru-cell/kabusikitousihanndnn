@@ -15,6 +15,7 @@
             --danger-color: #ff5252;
             --warning-color: #ffb300;
             --border-color: #2a2a32;
+            --subtext-color: #8b8d97;
         }
 
         body {
@@ -55,7 +56,7 @@
             height: 320px;
         }
 
-        /* テーブル・コンテンツ領域 */
+        /* コンテンツ領域 */
         .content-container {
             padding: 20px;
             max-width: 1200px;
@@ -144,6 +145,35 @@
             padding: 20px;
             color: #a1a1aa;
         }
+
+        /* 📝 免責事項フッター */
+        .disclaimer-box {
+            margin-top: 40px;
+            margin-bottom: 20px;
+            padding: 18px 22px;
+            background-color: var(--card-bg);
+            border-left: 4px solid var(--warning-color);
+            border-radius: 6px;
+            font-size: 0.8rem;
+            color: var(--subtext-color);
+            line-height: 1.6;
+        }
+
+        .disclaimer-box h3 {
+            margin-top: 0;
+            margin-bottom: 8px;
+            color: var(--warning-color);
+            font-size: 0.9rem;
+        }
+
+        .disclaimer-box ul {
+            margin: 0;
+            padding-left: 18px;
+        }
+
+        .disclaimer-box li {
+            margin-bottom: 4px;
+        }
     </style>
 </head>
 <body>
@@ -186,6 +216,17 @@
                     </tr>
                 </tbody>
             </table>
+        </div>
+
+        <!-- 📝 免責事項ブロック -->
+        <div class="disclaimer-box">
+            <h3>【免責事項】</h3>
+            <ul>
+                <li>本サイトで提供する投資シグナルや情報は、管理人の個人的な投資の記録およびエンターテインメントを目的としたものであり、投資勧誘や売買の指示を目的としたものではありません。</li>
+                <li>掲載されている情報は、正確性や将来の成果を保証するものではありません。過去のデータや検証結果は、将来の利益を約束するものではありません。</li>
+                <li>万が一、本サイトの情報に基づいて被ったいかなる損害（直接的・間接的を問わず）についても、管理人および当サイトは一切の責任を負いません。</li>
+                <li>実際の投資や取引は、リスクを十分にご理解の上、ご自身の判断と責任において行っていただきますようお願いいたします。</li>
+            </ul>
         </div>
     </div>
 
@@ -319,7 +360,6 @@
         window.onload = () => {
             initChart();
             fetchSignals();
-            // 30秒ごとに自動更新
             setInterval(fetchSignals, 30000);
         };
     </script>
