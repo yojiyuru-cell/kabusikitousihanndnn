@@ -23,7 +23,7 @@ app.add_middleware(
 CACHED_RESULTS = []
 IS_SCANNING = False
 
-# JPX400主要構成銘柄リスト（プライム市場・流動性上位）
+# JPX400主要構成銘柄リスト
 JPX400_STOCKS = {
     # 自動車・輸送機器
     "7203": "トヨタ自動車", "7267": "ホンダ", "7201": "日産自動車", "7270": "SUBARU",
@@ -92,8 +92,8 @@ def safe_float(val, default=0.0):
         return default
 
 def process_df(df, code, name):
-    """データフレームからシグナルとスコアを抽出"""
-    if df is None or df.empty or len(df) < 3:
+    """VWAPの下 且つ 5分足で下降トレンドの銘柄のみを厳選抽出"""
+    if df is None or df.empty or len(df) < 5:
         return None
 
     if isinstance(df.columns, pd.MultiIndex):
@@ -106,60 +106,87 @@ def process_df(df, code, name):
     # 重複削除＆ソート
     df = df.loc[~df.index.duplicated(keep='first')].sort_index()
 
-    c0 = df.iloc[-1]
-    c1 = df.iloc[-2]
-    c2 = df.iloc[-3]
+    # 移動平均線（SMA5, SMA20）の算出
+    df['SMA5'] = df['Close'].rolling(window=5).mean()
+    df['SMA20'] = df['Close'].rolling(window=20).mean()
 
-    close_p = safe_float(c0['Close'])
-    
-    if close_p <= 0 or close_p > 10000:
-        return None
-
+    # VWAP計算
     tp = (df['High'] + df['Low'] + df['Close']) / 3
     pv = tp * df['Volume']
     cum_pv = pv.cumsum()
     cum_vol = df['Volume'].cumsum()
     vwap_series = cum_pv / (cum_vol + 1e-5)
 
+    c0 = df.iloc[-1]
+    c1 = df.iloc[-2]
+    c2 = df.iloc[-3]
+
+    close_p  = safe_float(c0['Close'])
     open_p   = safe_float(c0['Open'])
     high_p   = safe_float(c0['High'])
     low_p    = safe_float(c0['Low'])
     vwap_val = safe_float(vwap_series.iloc[-1])
-    prev_vwap = safe_float(vwap_series.iloc[-2])
+
+    # 1. 価格上限チェック & 範囲外チェック
+    if close_p <= 0 or close_p > 10000:
+        return None
+
+    # 🚨 必須要件1：現在値がVWAPの下にあること（VWAP以上の場合は即除外）
+    if close_p >= vwap_val:
+        return None
 
     patterns = []
-    score = 0
+    score = 1  # VWAPの下に位置していることで基本点1点
 
+    # 2. 5分足での下降トレンド・反落シグナル判定
+    high1, low1 = safe_float(c1['High']), safe_float(c1['Low'])
+    high2, low2 = safe_float(c2['High']), safe_float(c2['Low'])
+
+    # 条件A: 高値・安値の切り下げ（Lower High & Lower Low）
+    if high_p < high1 and low_p < low1:
+        patterns.append("高値・安値切り下げ(下降トレンド)")
+        score += 2
+
+    # 条件B: 短期移動平均線の下降順列 (SMA5 < SMA20)
+    sma5_val = safe_float(c0['SMA5'])
+    sma20_val = safe_float(c0['SMA20'])
+    if sma5_val > 0 and sma20_val > 0 and sma5_val < sma20_val:
+        patterns.append("5分足パーフェクトオーダー(下落)")
+        score += 2
+
+    # 条件C: VWAPのデッドクロス（直前でVWAPを下抜けた）
+    c1_close = safe_float(c1['Close'])
+    prev_vwap = safe_float(vwap_series.iloc[-2])
+    if c1_close >= prev_vwap and close_p < vwap_val:
+        patterns.append("VWAPデッドクロス発生")
+        score += 3
+
+    # 条件D: 長い上ヒゲ（上値が重い）
     body_size = abs(close_p - open_p)
     upper_wick = high_p - max(open_p, close_p)
     if upper_wick >= max(body_size * 1.5, 3.0):
-        patterns.append("長い上ヒゲ（天井打）")
-        score += 3
+        patterns.append("長い上ヒゲ(上値抵抗)")
+        score += 2
 
-    c1_close = safe_float(c1['Close'])
+    # 条件E: 3本連続陰線（下落モメンタム強化）
     c1_open = safe_float(c1['Open'])
-    if (c1_close > c1_open) and (close_p < open_p) and (open_p >= c1_close) and (close_p <= c1_open):
-        patterns.append("陰線包み足（強反落）")
-        score += 3
-
-    if (c1_close >= prev_vwap) and (close_p < vwap_val):
-        patterns.append("VWAP下抜け（デッドクロス）")
-        score += 3
-    elif close_p < vwap_val:
-        patterns.append("VWAP下回り")
-        score += 1
-
     c2_close = safe_float(c2['Close'])
     c2_open = safe_float(c2['Open'])
     if (c2_close < c2_open) and (c1_close < c1_open) and (close_p < open_p):
         patterns.append("3本連続陰線")
         score += 2
 
-    if score == 0:
-        patterns.append("VWAP下回り" if close_p < vwap_val else "監視対象")
-        score = 1
+    # 🚨 必須要件2：単にVWAPの下にいるだけでなく、下降トレンド要素が少なくとも1つ以上あること
+    if len(patterns) == 0:
+        return None
 
-    judgment = "🚨 絶好の空売り好機" if score >= 4 else ("⚠️ 空売り検討（監視）" if score >= 2 else "🔹 VWAP下回り")
+    # 総合判定メッセージ
+    if score >= 5:
+        judgment = "🚨 絶好の空売り好機（強下降トレ）"
+    elif score >= 3:
+        judgment = "⚠️ 空売り検討（下降トレンド形成）"
+    else:
+        judgment = "🔹 VWAP下（下降初期）"
 
     return {
         "code": code,
@@ -170,7 +197,7 @@ def process_df(df, code, name):
         "score": score,
         "patterns": " / ".join(patterns),
         "judgment": judgment,
-        "stop_loss": round(close_p * 1.012, 1),
+        "stop_loss": round(max(vwap_val, close_p * 1.012), 1),  # 損切りはVWAP上抜けを基準に設定
         "take_profit": round(close_p * 0.975, 1)
     }
 
@@ -180,7 +207,7 @@ def run_scan():
         return
     
     IS_SCANNING = True
-    print("🔄 JPX400銘柄スキャン開始...")
+    print("🔄 JPX400銘柄スキャン開始（VWAP下＆5分足下降トレンド基準）...")
     
     targets = JPX400_STOCKS
     results = []
@@ -218,7 +245,7 @@ def run_scan():
         time.sleep(0.5)
 
     IS_SCANNING = False
-    print(f"✅ スキャン完了: Total {len(CACHED_RESULTS)} 銘柄（JPX400基準）")
+    print(f"✅ スキャン完了: Total {len(CACHED_RESULTS)} 銘柄（下降トレンド適合済み）")
 
 @app.on_event("startup")
 def startup_event():
