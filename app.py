@@ -182,7 +182,7 @@ def process_df(df, code, name):
 
     # 総合判定メッセージ
     if score >= 5:
-        judgment = "🚨 絶好の空売り好機（強下降トレ）"
+        judgment = "🚨 空売りチャンスかも？（強下降トレ）"
     elif score >= 3:
         judgment = "⚠️ 空売り検討（下降トレンド形成）"
     else:
