@@ -182,7 +182,7 @@ def process_df(df, code, name):
 
     # 総合判定メッセージ
     if score >= 5:
-        judgment = "🚨 チャンスかも？（強下降トレ）"
+        judgment = "🚨 結構気になる（強下降トレ）"
     elif score >= 3:
         judgment = "⚠️ 検討（下降トレンド形成）"
     else:
