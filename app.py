@@ -94,24 +94,31 @@ def safe_float(val, default=0.0):
 def process_df(df, code, name):
     """
     1時間足（75分足の代替）をベースに：
-    1. 移動平均線（SMA20）が下向き（下降トレンド）
-    2. 下落後 → 一時反発（戻り） → 再度下落を開始（戻り売り局面）の銘柄を検出
+    1. 移動平均線（SMA20）が下向き、または株価がSMA20の下にある
+    2. 反発後に伸び悩み・再下落の兆候がある銘柄を抽出
     """
-    if df is None or df.empty or len(df) < 25:
+    if df is None or df.empty or len(df) < 10:
         return None
 
+    # MultiIndexの解除
     if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(-1)
+        try:
+            df = df.xs(f"{code}.T", axis=1, level=1)
+        except Exception:
+            df.columns = df.columns.get_level_values(-1)
 
     required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
     if not all(col in df.columns for col in required_cols):
         return None
 
-    df = df.loc[~df.index.duplicated(keep='first')].sort_index()
+    df = df.dropna(subset=required_cols).loc[~df.index.duplicated(keep='first')].sort_index()
 
-    # 移動平均線の算出
-    df['SMA5'] = df['Close'].rolling(window=5).mean()
-    df['SMA20'] = df['Close'].rolling(window=20).mean()
+    if len(df) < 10:
+        return None
+
+    # 移動平均線
+    df['SMA5'] = df['Close'].rolling(window=5, min_periods=1).mean()
+    df['SMA20'] = df['Close'].rolling(window=20, min_periods=1).mean()
 
     # VWAP計算
     tp = (df['High'] + df['Low'] + df['Close']) / 3
@@ -120,11 +127,10 @@ def process_df(df, code, name):
     cum_vol = df['Volume'].cumsum()
     vwap_series = cum_pv / (cum_vol + 1e-5)
 
-    c0 = df.iloc[-1]   # 最新の足
-    c1 = df.iloc[-2]   # 1本前の足
-    c2 = df.iloc[-3]   # 2本前の足
-    c3 = df.iloc[-4]   # 3本前の足
-    c4 = df.iloc[-5]   # 4本前の足
+    c0 = df.iloc[-1]
+    c1 = df.iloc[-2] if len(df) >= 2 else c0
+    c2 = df.iloc[-3] if len(df) >= 3 else c1
+    c3 = df.iloc[-4] if len(df) >= 4 else c2
 
     close_p  = safe_float(c0['Close'])
     open_p   = safe_float(c0['Open'])
@@ -133,63 +139,47 @@ def process_df(df, code, name):
     vwap_val = safe_float(vwap_series.iloc[-1])
 
     sma20_now  = safe_float(c0['SMA20'])
-    sma20_prev = safe_float(c5['SMA20'] if len(df) >= 6 else c0['SMA20'])
+    sma20_prev = safe_float(df['SMA20'].iloc[-5] if len(df) >= 5 else c0['SMA20'])
 
-    # 価格制限（10,000円以下）
-    if close_p <= 0 or close_p > 10000:
+    if close_p <= 0 or close_p > 20000:
         return None
 
     patterns = []
     score = 0
 
-    # -------------------------------------------------------------
-    # 条件1：上位足（1時間足/75分足相当）が下向きトレンドか
-    # -------------------------------------------------------------
-    is_downtrend = False
+    # 1. 下降トレンド判定（SMA20が下向き、または終値がSMA20より下）
     if sma20_now < sma20_prev or close_p < sma20_now:
-        is_downtrend = True
         patterns.append("60-75分足が下向きトレンド")
         score += 2
-
-    # 下降トレンドでなければ対象外
-    if not is_downtrend:
+    else:
+        # トレンドが上向きの場合は除外
         return None
 
-    # -------------------------------------------------------------
-    # 条件2：「下落 → 反発上昇 → 再下落」の波形（戻り売りパターン）を判定
-    # -------------------------------------------------------------
-    # 直近3〜5本前の安値・高値の推移をチェック
-    c_recent_max_high = max(safe_float(c1['High']), safe_float(c2['High']), safe_float(c3['High']))
-    c_past_min_low    = min(safe_float(c3['Low']), safe_float(c4['Low']))
+    # 2. 戻り売りシグナル（上昇後の反落・上値重さ）
+    recent_high = max(safe_float(c1['High']), safe_float(c2['High']), safe_float(c3['High']))
+    recent_low  = min(safe_float(c1['Low']), safe_float(c2['Low']), safe_float(c3['Low']))
 
-    # 一時的に上昇（リバウンド）した履歴があるか
-    had_rebound = (c_recent_max_high > c_past_min_low * 1.005)
+    # 直近でわずかでも反発・リバウンドがあったか
+    if recent_high > recent_low * 1.002:
+        # 現在の足が陰線、または直近高値から押し戻されている
+        if close_p < open_p or close_p < recent_high:
+            patterns.append("戻り完了からの再下落シグナル")
+            score += 2
 
-    # 現在の足が反落（陰線、または直近高値から押されている）か
-    is_turning_down = (close_p < open_p) or (close_p < safe_float(c1['Close']))
-
-    if had_rebound and is_turning_down:
-        patterns.append("戻り完了からの再下落シグナル")
-        score += 3
-
-    # 移動平均線（SMA20）付近まで戻してからの反落（グランビルの戻り売り）
-    if abs(c_recent_max_high - sma20_now) / sma20_now < 0.01 and close_p < open_p:
-        patterns.append("移動平均線で頭打ち・戻り売り傾向")
-        score += 2
-
-    # 上げ止まりの長い上ヒゲが出ているか
-    body_size = abs(close_p - open_p)
-    upper_wick = high_p - max(open_p, close_p)
-    if upper_wick >= max(body_size * 1.2, 2.0):
-        patterns.append("戻り高値での上値抵抗（上ヒゲ）")
+    # 移動平均線（SMA20）付近での頭打ち
+    if abs(recent_high - sma20_now) / (sma20_now + 1e-5) < 0.015:
+        patterns.append("移動平均線で頭打ち")
         score += 1
 
-    # パターンが検知できなかった場合は除外
-    if len(patterns) <= 1:
-        return None
+    # 上ヒゲ確認
+    body_size = abs(close_p - open_p)
+    upper_wick = high_p - max(open_p, close_p)
+    if upper_wick > body_size and upper_wick > 0.5:
+        patterns.append("上ヒゲ（上値抵抗）")
+        score += 1
 
-    # 判定メッセージの設定
-    if score >= 5:
+    # 判定メッセージ
+    if score >= 4:
         judgment = "🎯 空売りチャンスかも？（戻り売り高精度）"
     elif score >= 3:
         judgment = "👀 戻り目からの再下落形成中"
@@ -205,7 +195,7 @@ def process_df(df, code, name):
         "score": score,
         "patterns": " / ".join(patterns),
         "judgment": judgment,
-        "stop_loss": round(max(c_recent_max_high, close_p * 1.015), 1),
+        "stop_loss": round(max(recent_high, close_p * 1.015), 1),
         "take_profit": round(close_p * 0.96, 1)
     }
 
@@ -215,46 +205,51 @@ def run_scan():
         return
     
     IS_SCANNING = True
-    print("🔄 JPX400銘柄スキャン開始（60-75分足 下向・戻り売り判定）...")
+    print("🔄 スキャン開始（60-75分足 戻り売り条件）...")
     
     targets = JPX400_STOCKS
     results = []
-
     codes = list(targets.keys())
-    chunk_size = 15
-    
+
+    # yfinanceで個別または小ブロック取得
+    chunk_size = 10
     for i in range(0, len(codes), chunk_size):
         chunk_codes = codes[i:i + chunk_size]
         tickers = [f"{c}.T" for c in chunk_codes]
 
         try:
-            # 75分足の代わりに「60分足（1h）」を1ヶ月分取得
             data = yf.download(tickers, period="1mo", interval="60m", group_by="ticker", threads=True, progress=False)
             
             for code in chunk_codes:
                 symbol = f"{code}.T"
                 try:
+                    df_single = None
                     if len(chunk_codes) == 1:
                         df_single = data
-                    else:
-                        df_single = data[symbol] if symbol in data else None
-                    
-                    if df_single is not None:
-                        item = process_df(df_single.dropna(how="all"), code, targets[code])
+                    elif isinstance(data.columns, pd.MultiIndex) and symbol in data.columns.levels[0]:
+                        df_single = data[symbol]
+
+                    # フォールバック（一括取得で失敗していた場合は個別取得）
+                    if df_single is None or df_single.dropna().empty:
+                        ticker_obj = yf.Ticker(symbol)
+                        df_single = ticker_obj.history(period="1mo", interval="60m")
+
+                    if df_single is not None and not df_single.empty:
+                        item = process_df(df_single, code, targets[code])
                         if item:
                             results.append(item)
                 except Exception as ex:
                     continue
         except Exception as e:
-            print(f"Error fetching chunk: {e}")
+            print(f"Chunk error: {e}")
 
         if results:
             CACHED_RESULTS = sorted(results, key=lambda x: x['score'], reverse=True)
             
-        time.sleep(0.5)
+        time.sleep(0.3)
 
     IS_SCANNING = False
-    print(f"✅ スキャン完了: Total {len(CACHED_RESULTS)} 銘柄（戻り売り適合済み）")
+    print(f"✅ スキャン完了: {len(CACHED_RESULTS)} 銘柄検出")
 
 @app.on_event("startup")
 def startup_event():
